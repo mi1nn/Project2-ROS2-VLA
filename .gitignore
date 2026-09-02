@@ -225,3 +225,7 @@ CLAUDE.md
 graphify*
 
 .DS_Store
+
+build/
+log/
+install/
