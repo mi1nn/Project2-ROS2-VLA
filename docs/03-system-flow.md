@@ -161,8 +161,8 @@ def execute_component(self, comp) -> bool:
 
 | | `object_detection` (kit_vision) | `position_estimation` (kit_robot) |
 | --- | --- | --- |
-| 단계 | ① mask 무게중심 → ② depth 중앙값 → ③ 역투영 | ④ hand-eye → ⑤ z_offset → ⑥ 작업영역 → ⑦ 후보 선정 |
-| 산출 | `camera_xyz` (토픽 발행) | `target_pose` (서비스 응답) |
+| 단계 | ① mask 무게중심 → ② depth 중앙값 → ③ 역투영 → polygon 첨부 | ④ hand-eye → ⑤ z_offset → ⑥ 작업영역 → ⑦ 파지 방향(mask 최소폭 축) → ⑧ 후보 선정 |
+| 산출 | `camera_xyz` + `masking_map` (토픽 발행) | `target_pose` (서비스 응답) |
 | 입력 | color / depth / camera_info | 검출 토픽 + request 의 `robot_posx` |
 | 의존성 | ultralytics, torch, GPU | numpy 만 |
 
@@ -172,25 +172,26 @@ def execute_component(self, comp) -> bool:
 
 
 ```
-seg mask ──▶ 무게중심 픽셀 (cx, cy)
-                │
-                ▼
-        mask 영역 depth 중앙값 cz
-                │
-                ▼
-     역투영 → 카메라 좌표 (X, Y, Z)      ← object_detection 담당, 여기까지가 /detection/objects 발행 내용
-                │
-                ▼
-   base2cam = base2gripper(request 의 robot_posx) @ gripper2cam
-                │
-                ▼
-        베이스 좌표 (x, y, z)             ← position_estimation 담당
-                │
-                ▼
-   z += 품목별 z_offset, 작업영역 클램프
-                │
-                ▼
-       posx = [x, y, z, rx, ry, rz]      ← rx,ry,rz 는 관찰 자세의 것 재사용
+seg mask ──▶ 무게중심 픽셀 (cx, cy)         seg mask ──▶ polygon (masking_map)
+                │                                            │
+                ▼                                            ▼
+        mask 영역 depth 중앙값 cz                    최소 외접 사각형 → 최소 폭 축 각도
+                │                                            │
+                ▼                                            │        ← 여기까지 object_detection 담당,
+     역투영 → 카메라 좌표 (X, Y, Z)                              │          /detection/objects 발행 내용
+                │                                            │          (camera_xyz + masking_map)
+                ▼                                            │
+   base2cam = base2gripper(request 의 robot_posx) @ gripper2cam     │
+                │                                            │
+                ▼                                            ▼
+        베이스 좌표 (x, y, z)                    최소 폭 축 각도 → rz 로 좌표계 변환
+                │                                            │       ← 여기부터 position_estimation 담당
+                ▼                                            │
+   z += 품목별 z_offset, 작업영역 클램프                          │
+                │                                            │
+                └──────────────────┬─────────────────────────┘
+                                    ▼
+                       posx = [x, y, z, rx, ry, rz]   ← rx,ry 는 관찰 자세 값 재사용, rz 는 mask 최소폭 축에서 계산
 ```
 
 ### 4.2 단계별 상세
@@ -236,7 +237,21 @@ z = max(z, MIN_DEPTH)                 # 2.0. 테이블 뚫는 것 방지
 
 `z_offset` 은 "카메라가 본 물체 표면" 과 "그리퍼가 잡아야 할 높이" 의 차이다. 물체 높이와 그리퍼 손가락 길이에 따라 달라지므로 **품목별로 실측해서 JSON 에 채운다.** 이 값을 코드 상수로 박아두면 9종 품목을 하나의 숫자로 커버하려다 실패한다.
 
-**⑥ 자세** — `rx, ry, rz` 는 관찰 자세 posx 의 값을 그대로 쓴다. 수직 하향 파지 고정이다. 1차 구현 범위에서는 물체 방향에 맞춘 회전 파지를 하지 않는다. seg mask 의 주축으로 회전각을 뽑는 건 확장 기능으로 남긴다.
+**⑥ 자세** — `rx, ry` 는 관찰 자세 posx 의 값을 그대로 쓴다. 그리퍼가 수직으로 내려가는 것 자체는 고정이다. `rz`(그리퍼가 닫히는 방향)는 이제 고정값이 아니라 아래 ⑦에서 계산한다.
+
+**⑦ 파지 방향 — mask 최소폭 축**
+
+```python
+# masking_map: object_detection 이 실어 보낸 polygon (픽셀 좌표, [x1,y1,x2,y2,...])
+rect = cv2.minAreaRect(polygon_points)     # ((cx,cy), (w,h), angle)
+short_side_angle = rect[2] if rect[1][0] < rect[1][1] else rect[2] + 90
+```
+
+평행 조(jaw) 그리퍼는 물체의 **가장 좁은 단면을 가로질러** 잡아야 안정적으로 닫힌다. 컵라면처럼 옆으로 누워 있거나 샴푸처럼 길쭉한 품목은 아무 각도로나 잡으면 그리퍼가 완전히 안 닫히거나 미끄러진다. `masking_map`(폴리곤)에 최소 외접 사각형을 씌워 짧은 변의 방향을 구하고, 그 각도를 그리퍼 폐쇄 축(`rz`)으로 삼는다.
+
+계산은 `position_estimation`이 한다. `masking_map`은 순수 좌표 배열이라 numpy(+cv2 기하 연산)만으로 되고, 이 노드가 torch 없이 도는 CPU 노드라는 전제([§4.1](#41-두-노드가-나눠-갖는다))는 안 깨진다. 카메라 픽셀 평면에서 구한 각도는 관찰 자세의 회전 성분만큼 베이스 좌표계로 보정해서 최종 `rz`에 넣는다.
+
+**폴백:** 이 계산이 실패하거나(폴리곤이 비었거나 자체검증을 못 넘기면) `rz`는 관찰 자세 값으로 되돌린다 — 회전 정렬을 못 해도 기존 수직 하향 파지는 그대로 동작해야 한다.
 
 ### 4.3 작업영역 검사
 
@@ -365,6 +380,5 @@ def place(slot_name, params):
 기획서가 확장 기능으로 분류한 것들. 지금 설계에 자리만 남겨두고 구현하지 않는다.
 
 - 검사 결과 기반 **자동 보정** (누락 품목 추가 파지, 오투입 품목 방출) — `InspectKit` 응답의 `missing`/`unexpected` 가 이미 필요한 정보를 담고 있고, 보정도 결국 Component 실행이다. `missing` 을 Component 리스트로 다시 flatten 해서 `EXECUTE` 를 한 번 더 도는 것으로 붙는다.
-- **3차원 형상 기반 파지점** — 현재는 mask 무게중심 + 수직 하향 고정. 포인트클라우드 기반 파지 자세 추정은 별개 작업이다.
-- **회전 파지** — seg mask 주축으로 `rz` 를 계산. 길쭉한 품목(샴푸)의 파지율이 낮게 나오면 그때 고려한다.
+- **3차원 형상 기반 파지점** — 현재는 mask 무게중심(xy) + mask 최소폭 축(rz, [§4.2](#42-단계별-상세)) + 수직 하향(rx,ry) 조합이다. 물체가 기울어진 채로 놓였을 때의 완전한 3D 파지 자세(포인트클라우드 기반)는 별개 작업으로 남긴다.
 - **DB 세부 관리** — 로봇은 `/kit/task_status` 발행까지만 책임진다.

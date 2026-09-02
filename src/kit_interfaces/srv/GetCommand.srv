@@ -1,0 +1,4 @@
+---
+bool   success
+string command_json
+string error_code
