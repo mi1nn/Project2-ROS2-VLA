@@ -10,16 +10,16 @@
 
 | Day | 날짜 | 작업 | 완료 판정 |
 | --- | --- | --- | --- |
-| 1 | 09-02 (화) | 패키지 4개 스캐폴딩. **`kit_interfaces` srv/msg 확정 후 팀 공유**. `ros2 topic list \| grep dsr` 로 로봇 상태 토픽 확인 | `colcon build` 통과, `ros2 interface show` 로 6개 타입 확인 |
-| 2 | 09-03 (수) | `ImgNode` 이식, `/detection/objects` **mock 발행** + `position_estimation` 골격 | `topic echo` + `service call` 왕복 성공 |
-| 3 | 09-04 (목) | **hand-eye 캘리브레이션 재수행**, `T_gripper2camera.npy` 산출·검증 | `verify.py` 재투영 오차 확인 |
-| 4 | 09-05 (금) | `motion.py`: `init` / `home` / `pick` / `place`, RG2 연동 | 손으로 입력한 좌표로 파지 성공 |
-| 5 | 09-06 (토) | 좌표 파이프라인 결선. 실제 YOLO seg 모델 투입 | 1개 품목 자동 파지 성공 |
-| 6 | 09-07 (일) | `controller`: **Component flatten + 실행 루프** + 상태머신 + `/kit/task_status` | 3 Component 연속 파지·배치 |
-| 7 | 09-08 (월) | 음성/LLM 노드 결합, `/inspect_kit` 재검사 구현 | E2E 1회 관통 |
-| 8 | 09-09 (화) | 재시도·실패 처리, `grasp_params.json` 품목별 튜닝 | 품목별 파지율 측정치 확보 |
-| 9 | 09-10 (수) | E2E 20회 시험, 실패 로그 분석·개선 | 평가 결과표 |
-| 10 | 09-11 (목) | 버퍼 / 문서 정리 / 시연 영상 | — |
+| 1 | 09-02 (수) | 패키지 4개 스캐폴딩. **`kit_interfaces` srv/msg 확정 후 팀 공유**. `ros2 topic list \| grep dsr` 로 로봇 상태 토픽 확인 | `colcon build` 통과, `ros2 interface show` 로 6개 타입 확인 |
+| 2 | 09-03 (목) | `ImgNode` 이식, `/detection/objects` **mock 발행** + `position_estimation` 골격 | `topic echo` + `service call` 왕복 성공 |
+| 3 | 09-04 (금) | **hand-eye 캘리브레이션 재수행**, `T_gripper2camera.npy` 산출·검증 | `verify.py` 재투영 오차 확인 |
+| 4 | 09-05 (토) | `motion.py`: `init` / `home` / `pick` / `place`, RG2 연동 | 손으로 입력한 좌표로 파지 성공 |
+| 5 | 09-06 (일) | 좌표 파이프라인 결선. 실제 YOLO seg 모델 투입 | 1개 품목 자동 파지 성공 |
+| 6 | 09-07 (월) | `controller`: **Component flatten + 실행 루프** + 상태머신 + `/kit/task_status` | 3 Component 연속 파지·배치 |
+| 7 | 09-08 (화) | 음성/LLM 노드 결합, `/inspect_kit` 재검사 구현 | E2E 1회 관통 |
+| 8 | 09-09 (수) | 재시도·실패 처리, `grasp_params.json` 품목별 튜닝 | 품목별 파지율 측정치 확보 |
+| 9 | 09-10 (목) | E2E 20회 시험, 실패 로그 분석·개선 | 평가 결과표 |
+| 10 | 09-11 (금) | 버퍼 / 문서 정리 / 시연 영상 | — |
 
 ---
 

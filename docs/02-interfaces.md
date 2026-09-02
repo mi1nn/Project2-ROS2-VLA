@@ -97,13 +97,15 @@ float64[] depth_position
 string     class_name      # class_names.json 의 이름. 예: "cup_ramen"
 float32    score           # 0.0 ~ 1.0
 float64[3] camera_xyz      # 카메라 좌표계 (x, y, z), mm
-int32[4]   bbox            # x1 y1 x2 y2 픽셀. 로깅/디버깅용
+fload64[]  masking_map     # polygon 마스킹맵 
 int32[2]   centroid_px     # seg mask 무게중심 픽셀 (x, y). 로깅/디버깅용
 ```
 
-**`camera_xyz` 까지 `object_detection` 이 채운다.** 픽셀만 발행하고 좌표 변환을 나중에 하는 방식도 가능하지만, 그러면 color 프레임(mask)과 depth 프레임의 시각 동기를 `message_filters` 로 따로 맞춰야 한다. `object_detection` 노드 하나만이 color·depth·camera_info 를 **모두** 갖고 있으므로, 여기서 역투영까지 끝내면 세 프레임의 동기가 자동으로 맞는다. 동기화 코드를 아예 안 쓰는 게 가장 확실하다.
+**`camera_xy` 까지 `object_detection` 이 채운다.** 픽셀만 발행하고 좌표 변환을 나중에 하는 방식도 가능하지만, 그러면 color 프레임(mask)과 depth 프레임의 시각 동기를 `message_filters` 로 따로 맞춰야 한다. `object_detection` 노드 하나만이 color·depth·camera_info 를 **모두** 갖고 있으므로, 여기서 역투영까지 끝내면 세 프레임의 동기가 자동으로 맞는다. 동기화 코드를 아예 안 쓰는 게 가장 확실하다.
+camera의 xy좌표계와 depth카메라의 z좌표계가 다를 수 있어, 분리한다. 
 
-`bbox` 와 `centroid_px` 는 실패 추적용이다. 파지 실패 로그에 픽셀 좌표가 없으면 "검출이 틀렸는지 변환이 틀렸는지" 를 나중에 가릴 수 없다.
+객체탐지를 진행해서 얻은 polygon 마스킹맵을 받아 가장 짧은 파지 거리를 측정한다.
+
 
 ### 2.3 `msg/DetectionArray.msg` → 토픽 `/detection/objects`
 
@@ -131,7 +133,6 @@ string[]   exclude_taken    # 이미 집어간 위치 제외용 (선택)
 bool           success
 float64[6]     target_pose      # 베이스 좌표 파지 자세 (mm, deg)
 DetectedObject source           # 응답 근거가 된 원본 검출
-float64        detection_age    # 사용한 검출의 나이(초)
 string         error_code       # 아래 표 참조
 ```
 
@@ -173,7 +174,7 @@ eye-in-hand 구성에서 가장 위험한 실패다. position_estimation 이 들
 
 `detection_age` 를 응답에 담아 controller 가 로그에 남긴다. 조용히 넘어가는 실패를 만들지 않는다.
 
-### 2.7 `srv/InspectKit.srv` → `position_estimation` 이 서버
+### 2.7 `srv/InspectKit.srv` → `controller` 가 서버
 
 작업 완료 후 키팅 트레이를 재촬영해 실제 구성 결과를 판정한다. 기획서의 "작업 실행 여부가 아니라 실제 키트 구성 결과를 기준으로 성공 판정" 요구를 담는 인터페이스다.
 
@@ -197,7 +198,7 @@ float64  detection_age
 
 ## 3. 음성 ↔ 로봇
 
-### 3.1 `srv/GetCommand.srv` → `command_node` 가 서버, `controller` 가 클라이언트
+### 3.1 `srv/GetCommand.srv` → `command_node` 가 서버
 
 ```
 ---
