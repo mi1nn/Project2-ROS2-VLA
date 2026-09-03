@@ -1,3 +1,6 @@
+from glob import glob
+import os
+
 from setuptools import find_packages, setup
 
 package_name = 'kit_voice'
@@ -10,6 +13,9 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        (os.path.join('share', package_name, 'resource'), glob('resource/*')),
+        # glob('resource/*') 는 점(.)으로 시작하는 파일을 안 잡는다 — .env 는 따로 챙긴다.
+        (os.path.join('share', package_name, 'resource'), glob('resource/.env')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -24,6 +30,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'get_command = kit_voice.get_keyword:main',
         ],
     },
 )
