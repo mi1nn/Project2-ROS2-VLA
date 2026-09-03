@@ -110,3 +110,27 @@ def test_failed_component_does_not_decrement_inventory(
     PersistenceService(collections, inventory).record_component(message)
 
     inventory.decrement.assert_not_called()
+
+
+def test_replayed_successful_component_does_not_decrement_twice(
+    monkeypatch, dependencies
+):
+    collections, inventory = dependencies
+    collections['component_executions'].update_one.return_value = (
+        SimpleNamespace(upserted_id=None)
+    )
+    message = SimpleNamespace(task_id='TASK-1', component_index=0)
+    document = {
+        'task_id': 'TASK-1',
+        'component_index': 0,
+        'class_name': 'mask',
+        'status': 'SUCCESS',
+        'attempts': [{'result': 'SUCCESS'}],
+    }
+    monkeypatch.setattr(
+        'kit_db.persistence.component_document', lambda _: document
+    )
+
+    PersistenceService(collections, inventory).record_component(message)
+
+    inventory.decrement.assert_not_called()
