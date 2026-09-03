@@ -219,6 +219,8 @@ __marimo__/
 
 .claude
 .serena
+.agents
+skills-*
 reference
 CLAUDE.md
 claudemap-*
