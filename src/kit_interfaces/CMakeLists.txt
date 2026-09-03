@@ -12,6 +12,9 @@ find_package(std_msgs REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/DetectedObject.msg"
   "msg/DetectionArray.msg"
+  "msg/CommandResult.msg"
+  "msg/ComponentResult.msg"
+  "msg/TaskStatus.msg"
   "srv/GetCommand.srv"
   "srv/GetComponentPose.srv"
   "srv/InspectKit.srv"
