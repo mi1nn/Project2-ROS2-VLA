@@ -25,7 +25,7 @@ ENV_PATH = os.path.join(RESOURCE_PATH, ".env")
 load_dotenv(dotenv_path=ENV_PATH)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-# class_names.json 은 kit_vision 쪽 팀원 산출물이 단일 진실 원천이다 (02-interfaces.md §3.1).
+# class_names.json 은 kit_vision 쪽 산출물이 단일 진실 원천이다 (02-interfaces.md §3.1).
 # name 검증 책임이 음성 노드에 있으므로 같은 파일을 그대로 읽어 프롬프트/검증에 쓴다.
 CLASS_NAMES_PATH = os.path.join(
     get_package_share_directory("kit_vision"), "resource", "class_names.json"
