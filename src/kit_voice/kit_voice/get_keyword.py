@@ -128,6 +128,11 @@ class GetCommandNode(Node):
         return "openai_rate_limit"
 
     def get_command(self, request, response):
+        # task_id 는 controller 가 작업 시작 시 생성해 요청에 담아 보낸다 (kit_interfaces
+        # GetCommand.srv). 여기서는 그대로 받아 파싱 결과에 심어 로그·DB 기록에 흘려보낸다.
+        # /kit/command_result 발행자가 붙으면 message.task_id = request.task_id 로 넘긴다.
+        task_id = request.task_id
+
         try:
             self.wakeup_word.open()
         except Exception as e:
@@ -192,6 +197,7 @@ class GetCommandNode(Node):
             return response
 
         command["raw_text"] = raw_text
+        command["task_id"] = task_id
         self.get_logger().info(f"command: {command}")
 
         response.success = True

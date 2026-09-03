@@ -200,13 +200,20 @@ float64  detection_age
 ### 3.1 `srv/GetCommand.srv` → `command_node` 가 서버
 
 ```
+string task_id   # 작업 1회 식별자. controller 가 생성해 요청에 담는다.
 ---
 bool   success
 string command_json
 string error_code
 ```
 
-요청 필드가 없다. 레퍼런스가 `std_srvs/Trigger` 를 쓰던 자리인데, 응답 구조가 달라서 전용 srv 로 만든다.
+레퍼런스가 `std_srvs/Trigger` 를 쓰던 자리인데, 응답 구조가 달라서 전용 srv 로 만든다.
+
+**`task_id`.** MongoDB `commands`/`kit_executions`/`component_executions` 세 컬렉션을 하나의
+작업으로 묶는 키다([db_table_collection.md](db_table_collection.md) ID 체계). `controller` 가
+`IDLE → LISTEN` 진입 시(이 서비스를 호출하는 유일한 지점) 생성해서 요청에 실어 보낸다.
+`command_node` 는 응답을 만들 때 이 값을 그대로 `command_json` 에 심어 돌려주므로, 이후 DB 기록
+단계에서 재발급하지 않고 요청 시점의 값을 계속 쓴다.
 
 > **웨이크워드 감지 범위 — 팀원과 확인 필요.** controller 는 `LISTEN` 상태에서만 이 서비스를 호출하고, 요청을 하나 보낸 뒤 응답이 올 때까지 다음 요청을 보내지 않는다. 즉 `VALIDATE`~`REPORT` 구간에는 이 서비스 자체를 호출하지 않으므로, **`command_node` 의 웨이크워드 감지가 이 서비스 콜백 안에서만 동작한다는 전제**하에 실행 중 발화가 자동으로 무시된다. 만약 `command_node` 가 요청 유무와 무관하게 백그라운드로 항상 마이크를 열어놓는 구조라면, EXECUTE 중 발화가 어딘가에 버퍼링됐다가 다음 `LISTEN` 에서 갑자기 튀어나올 수 있다 — 이 경우 계약을 다시 봐야 한다.
 
@@ -219,7 +226,8 @@ string error_code
     {"name": "cup_ramen", "qty": 2},
     {"name": "mask",      "qty": 1}
   ],
-  "raw_text": "지진 키트로 컵라면 두 개랑 마스크 하나 담아줘"
+  "raw_text": "지진 키트로 컵라면 두 개랑 마스크 하나 담아줘",
+  "task_id": "..."
 }
 ```
 

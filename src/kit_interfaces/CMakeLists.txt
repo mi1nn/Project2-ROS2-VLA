@@ -9,13 +9,17 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(builtin_interfaces REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/DetectedObject.msg"
   "msg/DetectionArray.msg"
+  "msg/CommandResult.msg"
+  "msg/TaskStatus.msg"
+  "msg/ComponentResult.msg"
   "srv/GetCommand.srv"
   "srv/GetComponentPose.srv"
   "srv/InspectKit.srv"
-  DEPENDENCIES std_msgs
+  DEPENDENCIES std_msgs builtin_interfaces
 )
 
 if(BUILD_TESTING)
