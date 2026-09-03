@@ -17,29 +17,29 @@ class PersistenceService:
 
     def record_command(self, message):
         document = command_document(message)
-        return self._mongo_database['commands'].update_one(
+        return self._upsert(
+            'commands',
             {'task_id': message.task_id},
             {'$set': document},
-            upsert=True,
         )
 
     def record_task_status(self, message):
         update = task_status_update(message)
-        return self._mongo_database['kit_executions'].update_one(
+        return self._upsert(
+            'kit_executions',
             {'task_id': message.task_id},
             update,
-            upsert=True,
         )
 
     def record_component(self, message):
         document = component_document(message)
-        result = self._mongo_database['component_executions'].update_one(
+        result = self._upsert(
+            'component_executions',
             {
                 'task_id': message.task_id,
                 'component_index': message.component_index,
             },
             {'$set': document},
-            upsert=True,
         )
 
         if should_decrement_inventory(
@@ -48,3 +48,10 @@ class PersistenceService:
             self._inventory_repository.decrement(document['class_name'])
 
         return result
+
+    def _upsert(self, collection_name, identity, update):
+        return self._mongo_database[collection_name].update_one(
+            identity,
+            update,
+            upsert=True,
+        )
