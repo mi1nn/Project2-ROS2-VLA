@@ -9,6 +9,9 @@
 
   <depend>rclpy</depend>
   <depend>kit_interfaces</depend>
+  <depend>ament_index_python</depend>
+  <!-- class_names.json (품목 검증용) 을 kit_vision 의 share 리소스에서 그대로 읽는다 -->
+  <exec_depend>kit_vision</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
