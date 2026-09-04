@@ -14,8 +14,13 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/DetectedObject.msg"
   "msg/DetectionArray.msg"
   "msg/CommandResult.msg"
+<<<<<<< HEAD
   "msg/TaskStatus.msg"
   "msg/ComponentResult.msg"
+=======
+  "msg/ComponentResult.msg"
+  "msg/TaskStatus.msg"
+>>>>>>> 0fc2a9700957492865cb6e422ef4d7654238b7e2
   "srv/GetCommand.srv"
   "srv/GetComponentPose.srv"
   "srv/InspectKit.srv"
