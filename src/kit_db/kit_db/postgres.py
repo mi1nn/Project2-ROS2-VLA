@@ -19,7 +19,14 @@ class PostgreSQL:
             dbname=self._connection_info.database,
             user=self._connection_info.user,
             password=self._connection_info.password,
+            connect_timeout=3,
         )
+
+    def ping(self):
+        with self.connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute('SELECT 1')
+                return cursor.fetchone()
 
 
 # 재고 조회 및 갱신을 위한 Repository 클래스
