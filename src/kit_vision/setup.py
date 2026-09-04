@@ -14,6 +14,7 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         (os.path.join('share', package_name, 'resource'), glob('resource/*')),
+        (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -29,6 +30,7 @@ setup(
     entry_points={
         'console_scripts': [
             'object_detection = kit_vision.object_detection:main',
+            'debug_view = kit_vision.debug_view:main',
         ],
     },
 )
