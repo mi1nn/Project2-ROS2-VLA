@@ -29,6 +29,7 @@ setup(
     entry_points={
         'console_scripts': [
             'object_detection = kit_vision.object_detection:main',
+            'debug_view = kit_vision.debug_view:main',
         ],
     },
 )
