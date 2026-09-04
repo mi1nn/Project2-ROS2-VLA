@@ -1,0 +1,19 @@
+motion:
+  positions:
+    home:
+      type: "joint"
+      pos: [0.0, 0.0, 90.0, 0.0, 90.0, 0.0]
+      joint_vel: 30.0
+      joint_acc: 60.0
+
+    pick_camera:
+      type: "joint"
+      pos: [0.0, 0.0, 60.0, 0.0, 120.0, 0.0]
+      joint_vel: 30.0
+      joint_acc: 60.0
+
+    place_camera:
+      type: "joint"
+      pos: [22.0, 10.0, 80.0, -15.0, 60.0, 30.0]
+      joint_vel: 30.0
+      joint_acc: 60.0

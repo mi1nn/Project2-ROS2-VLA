@@ -15,6 +15,7 @@ setup(
         ('share/' + package_name, ['package.xml']),
         # T_gripper2camera.npy(Day 3)/grasp_params.json(Day 8)이 여기로 들어온다.
         (os.path.join('share', package_name, 'resource'), glob('resource/*')),
+        (os.path.join("share", package_name, "config"),glob("config/*.yaml")),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -30,6 +31,7 @@ setup(
     entry_points={
         'console_scripts': [
             'position_estimation = kit_robot.position_estimation:main',
+            'motion_test = kit_robot.motion_test:main',
         ],
     },
 )
