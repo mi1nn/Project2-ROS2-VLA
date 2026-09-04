@@ -1,0 +1,84 @@
+import rclpy
+from rclpy.node import Node
+
+from kit_interfaces.msg import (
+    CommandResult,
+    ComponentResult,
+    TaskStatus,
+)
+
+from pymongo.errors import PyMongoError
+
+
+class DBNode(Node):
+    def __init__(self, persistence, mongodb):
+        super().__init__('kit_db')
+
+        # 데이터 영속성을 담당하는 객체
+        self._persistence = persistence
+        self._mongodb = mongodb
+
+        self._command_subscription = self.create_subscription(
+            CommandResult,
+            '/kit/command_result',
+            self._command_callback,
+            10,
+        )
+
+        self._task_status_subscription = self.create_subscription(
+            TaskStatus,
+            '/kit/task_status',
+            self._task_status_callback,
+            10,
+        )
+
+        self._component_subscription = self.create_subscription(
+            ComponentResult,
+            '/kit/component_result',
+            self._component_callback,
+            10,
+        )
+
+    # 세 callback의 공통 실행 및 예외 처리 함수
+    # -> 동일한 예외 처리 구조가 반복되는 것을 방지
+    def _handle_message(self, message, handler, message_name):
+        try:
+            handler(message)
+        # ValueError 예외 처리
+        except ValueError as error:
+            self.get_logger().error(
+                f'Invalid {message_name} '
+                f'for task {message.task_id}: {error}'
+            )
+        # MongoDB 관련 예외 처리
+        except PyMongoError as error:
+            self.get_logger().error(
+                f'Failed to store {message_name} '
+                f'for task {message.task_id}: {error}'
+            )
+
+    def _command_callback(self, message):
+        self._handle_message(
+            message,
+            self._persistence.record_command,
+            'CommandResult',
+        )
+
+
+    def _task_status_callback(self, message):
+        self._handle_message(
+            message,
+            self._persistence.record_task_status,
+            'TaskStatus',
+        )
+
+
+    def _component_callback(self, message):
+        self._handle_message(
+            message,
+            self._persistence.record_component,
+            'ComponentResult',
+        )
+
+    def close(self):
+        self._mongodb.close()
