@@ -20,9 +20,10 @@ from kit_interfaces.srv import GetComponentPose, InspectKit
 
 PACKAGE_NAME = "kit_robot"
 
-# 검출 토픽은 상시 발행 + 최신 검출만 의미 있음 → RELIABLE, depth=1 (02-interfaces.md §2.3).
-# 구독 쪽도 동일 QoS 라야 매칭된다.
-DETECTION_QOS = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, depth=1)
+# 검출 토픽은 상시 발행 + 최신 검출만 의미 있음 → BEST_EFFORT, depth=1 (02-interfaces.md §2.3).
+# 구독 쪽도 동일 QoS 라야 매칭된다. 신선도는 max_age_sec 로 이 노드가 검사하므로
+# 트랜스포트의 재전송 보장은 불필요하다.
+DETECTION_QOS = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, depth=1)
 
 # 레퍼런스 기본값. 품목별 실측치는 resource/grasp_params.json 이 있으면 그쪽 우선 (Day 8 튜닝).
 DEPTH_OFFSET = -35.0

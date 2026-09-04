@@ -119,7 +119,9 @@ DetectedObject[] objects   # 이번 프레임의 전체 검출. 없으면 빈 �
 - 같은 클래스가 여러 개 보이면 모두 담는다. 몇 개를 집을지는 controller 가 레시피를 보고 정한다.
 - 발행 주기 목표 2~5 Hz.
 
-**QoS:** RELIABLE, `depth=1`. **최신 검출만 의미가 있다** — 큐에 쌓인 과거 검출은 유해하다. 카메라 원본 이미지 토픽은 BEST_EFFORT (`reference/subscriber_sourcecode/subscriber_img.py` 의 프로파일).
+**QoS:** BEST_EFFORT, `depth=1`. **최신 검출만 의미가 있다** — 큐에 쌓인 과거 검출은 유해하다. 카메라 원본 이미지 토픽과 동일 정책 (`reference/subscriber_sourcecode/subscriber_img.py` 의 프로파일).
+
+> **2026-09-04 수정: RELIABLE → BEST_EFFORT.** 애초에 "가공된 신호라 유실 비용이 크다"는 감으로 RELIABLE을 기본값으로 잡았는데, 다시 보니 근거가 약했다. `depth=1`이라 옛 프레임은 어차피 버려지고, `position_estimation`이 `max_age_sec`로 신선도를 앱 레벨에서 이미 검사한다 — 한 틱 유실돼도 0.3s 뒤 다음 발행이 덮어쓰므로 트랜스포트의 재전송 보장이 실제로 하는 일이 없다. 오히려 RELIABLE의 ACK/재전송이 최신 프레임 전달을 지연시킬 여지만 있어, 원본 카메라 토픽과 정책을 통일했다.
 
 ### 2.4 `srv/GetComponentPose.srv` → `position_estimation` 이 서버
 
