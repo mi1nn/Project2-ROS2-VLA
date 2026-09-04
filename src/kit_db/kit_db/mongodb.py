@@ -35,3 +35,40 @@ class MongoDB:
     # DB 노드 종료 시 호출
     def close(self):
         self._client.close()
+
+
+class MongoRepository:
+    # 매핑된 메시지를 계약에 지정된 MongoDB 컬렉션에 저장
+    def __init__(self, mongodb):
+        self._commands = mongodb.collection('commands')
+        self._kit_executions = mongodb.collection('kit_executions')
+        self._component_executions = mongodb.collection(
+            'component_executions'
+        )
+
+    # Command는 task_id 기준 최초 문서만 저장
+    def save_command(self, document):
+        return self._commands.update_one(
+            {'task_id': document['task_id']},
+            {'$setOnInsert': document},
+            upsert=True,
+        )
+
+    # Kit 실행 문서는 task_id 기준으로 현재 상태와 이력을 갱신
+    def update_task_status(self, task_id, update):
+        return self._kit_executions.update_one(
+            {'task_id': task_id},
+            update,
+            upsert=True,
+        )
+
+    # Component는 task_id와 component_index 기준 최초 문서만 저장
+    def save_component(self, document):
+        return self._component_executions.update_one(
+            {
+                'task_id': document['task_id'],
+                'component_index': document['component_index'],
+            },
+            {'$setOnInsert': document},
+            upsert=True,
+        )
