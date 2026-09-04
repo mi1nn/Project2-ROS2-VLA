@@ -8,8 +8,9 @@ from kit_db.message_mapper import (
 )
 
 class PersistenceService:
-    def __init__(self, mongo_repository):
+    def __init__(self, mongo_repository, inventory_repository):
         self._mongo_repository = mongo_repository
+        self._inventory_repository = inventory_repository
 
     # ROS 메시지를 MongoDB에 저장하는 메서드들
     # 1. record_command: CommandResult.msg -> commands document에 저장
@@ -29,5 +30,14 @@ class PersistenceService:
     # 3. record_component: ComponentResult.msg -> components document에 저장
     def record_component(self, message):
         document = component_document(message)
-        return self._mongo_repository.save_component(document)
+        result = self._mongo_repository.save_component(document)
+
+        if (
+            result.upserted_id is not None
+            and document['status'] == 'SUCCESS'
+        ):
+            self._inventory_repository.decrement(
+                document['class_name']
+            )
+        return result
 
