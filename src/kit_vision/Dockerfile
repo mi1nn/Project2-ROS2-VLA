@@ -24,7 +24,12 @@ RUN pip install --no-cache-dir --break-system-packages \
 # numpy만 --ignore-installed로 따로 갈아치운다 — 이 플래그를 ultralytics 설치에 같이 쓰면
 # 방금 깐 CPU torch까지 "설치 안 된 것" 취급해서 CUDA torch를 통째로 재다운로드해버린다.
 RUN pip install --no-cache-dir --break-system-packages --ignore-installed numpy
-RUN pip install --no-cache-dir --break-system-packages ultralytics opencv-python
+# cv_bridge_boost.so는 apt 빌드 시점의 numpy 1.x ABI로 컴파일돼 있어서, numpy 2.x로 올리면
+# import는 되지만 실제 이미지 변환(imgmsg_to_cv2) 호출 시 세그폴트(exit -11)로 죽는다.
+# ultralytics/opencv-python 최신판은 numpy2를 끌어오므로, 이 pip 호출에 numpy<2를 같이 줘서
+# 한 번의 resolve로 numpy1과 맞는 opencv-python(4.x)이 선택되게 한다 — 따로 pip install을
+# 나누면 뒤 단계가 numpy를 다시 2.x로 끌어올려버린다(직접 검증함).
+RUN pip install --no-cache-dir --break-system-packages "numpy<2" ultralytics opencv-python
 
 WORKDIR /ws
 COPY src/kit_interfaces src/kit_interfaces
