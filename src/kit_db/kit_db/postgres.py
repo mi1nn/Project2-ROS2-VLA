@@ -7,6 +7,7 @@
 import psycopg2
 
 
+# PostgreSQL 데이터베이스 연결을 위한 클래스
 class PostgreSQL:
     def __init__(self, connection_info):
         self._connection_info = connection_info
@@ -18,13 +19,22 @@ class PostgreSQL:
             dbname=self._connection_info.database,
             user=self._connection_info.user,
             password=self._connection_info.password,
+            connect_timeout=3,
         )
 
+    def ping(self):
+        with self.connect() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute('SELECT 1')
+                return cursor.fetchone()
 
+
+# 재고 조회 및 갱신을 위한 Repository 클래스
 class InventoryRepository:
     def __init__(self, database):
         self._database = database
 
+    # 재고 조회
     def find_all(self):
         query = """
             SELECT
@@ -43,6 +53,7 @@ class InventoryRepository:
                 cursor.execute(query)
                 return cursor.fetchall()
 
+    # 재고 갱신
     def decrement(self, item_code):
         query = """
             UPDATE inventory AS inventory

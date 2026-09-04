@@ -24,6 +24,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'db_node = kit_db.db_node:main',
         ],
     },
 )
