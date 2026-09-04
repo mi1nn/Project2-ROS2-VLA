@@ -1,9 +1,0 @@
-string     component        # 클래스 이름
-float64[6] robot_posx       # 촬영 시점 로봇 자세 (mm, deg). controller 가 채운다
-float64    max_age_sec      # 이보다 오래된 검출은 거부. 0 이면 기본값
-string[]   exclude_taken    # 이미 집어간 위치 제외용 (선택)
----
-bool           success
-float64[6]     target_pose      # 베이스 좌표 파지 자세 (mm, deg)
-DetectedObject source           # 응답 근거가 된 원본 검출
-string         error_code       # 아래 표 참조
