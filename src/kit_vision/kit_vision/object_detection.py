@@ -8,8 +8,10 @@ from kit_interfaces.msg import DetectedObject, DetectionArray
 from kit_vision.realsense import ImgNode
 from kit_vision.yolo_model import YoloModel
 
-# 검출 토픽은 상시 발행 + 최신 검출만 의미 있음 → RELIABLE, depth=1 (02-interfaces.md §2.3)
-DETECTION_QOS = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, depth=1)
+# 검출 토픽은 상시 발행 + 최신 검출만 의미 있음 → BEST_EFFORT, depth=1 (02-interfaces.md §2.3)
+# depth=1 이라 옛 프레임은 어차피 버려지고, 구독측이 max_age_sec 로 신선도를 앱 레벨에서
+# 검사한다 — 한 틱 유실돼도 0.3s 뒤 다음 발행이 덮어쓴다. RELIABLE 의 재전송 보장이 할 일이 없다.
+DETECTION_QOS = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, depth=1)
 
 # 목표 2~5Hz. 0.3s ~= 3.3Hz.
 PUBLISH_PERIOD_SEC = 0.3
