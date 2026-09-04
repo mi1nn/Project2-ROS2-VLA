@@ -13,6 +13,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Ubuntu 24.04(Noble) 이미지는 PEP 668 externally-managed 환경이라 시스템 pip 설치엔
 # --break-system-packages 가 필요하다. 컨테이너 전용 이미지라 venv 로 나눌 이유가 없다.
+#
+# torch를 먼저 CPU 전용 wheel로 깔아둔다. 안 그러면 ultralytics가 끌어오는 기본 torch가
+# CUDA용이라 nvidia-cudnn/cublas/nccl 등으로 이미지가 수 GB 불어난다 — 이 컨테이너엔
+# GPU 패스스루(--gpus, nvidia-container-toolkit) 설정이 없어서 그 무게가 전부 낭비다.
+RUN pip install --no-cache-dir --break-system-packages \
+        torch --index-url https://download.pytorch.org/whl/cpu
+# ros-jazzy-cv-bridge가 apt(python3-numpy)로 numpy를 이미 깔아놓는데, dpkg 설치본은
+# pip 메타데이터(RECORD)가 없어 pip가 업그레이드하려다 "Cannot uninstall"로 죽는다.
+# numpy만 --ignore-installed로 따로 갈아치운다 — 이 플래그를 ultralytics 설치에 같이 쓰면
+# 방금 깐 CPU torch까지 "설치 안 된 것" 취급해서 CUDA torch를 통째로 재다운로드해버린다.
+RUN pip install --no-cache-dir --break-system-packages --ignore-installed numpy
 RUN pip install --no-cache-dir --break-system-packages ultralytics opencv-python
 
 WORKDIR /ws
