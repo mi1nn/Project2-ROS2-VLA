@@ -13,8 +13,6 @@ from kit_db.config import MongoDBConfig
 from kit_db.mongodb import MongoDB, MongoRepository
 from kit_db.persistence import PersistenceService
 
-config = MongoDBConfig.from_environment()
-
 class DBNode(Node):
     def __init__(self, persistence, mongodb):
         super().__init__('kit_db')
