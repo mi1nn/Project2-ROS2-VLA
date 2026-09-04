@@ -1,0 +1,13 @@
+{
+    "_default":    { "strategy": "top_down", "width": 500, "force": 200, "z_offset": -35.0, "approach": 100.0 },
+
+    "컵라면":       { "strategy": "top_down", "width": 900, "force": 150, "z_offset": -30.0, "approach": 120.0 },
+    "햄":          { "strategy": "top_down", "width": 650, "force": 250, "z_offset": -25.0, "approach": 100.0 },
+    "분유":        { "strategy": "top_down", "width": 900, "force": 200, "z_offset": -30.0, "approach": 120.0 },
+    "샴푸리필":     { "strategy": "top_down", "width": 600, "force": 100, "z_offset": -20.0, "approach": 100.0 },
+    "수세미":       { "strategy": "top_down", "width": 500, "force": 100, "z_offset": -20.0, "approach": 90.0 },
+    "양갱":        { "strategy": "top_down", "width": 300, "force": 120, "z_offset": -15.0, "approach": 80.0 },
+    "여행용티슈":    { "strategy": "top_down", "width": 400, "force": 100, "z_offset": -20.0, "approach": 80.0 },
+    "일회용숟가락":  { "strategy": "top_down", "width": 250, "force": 100, "z_offset": -15.0, "approach": 80.0 },
+    "마스크":       { "strategy": "top_down", "width": 350, "force": 100, "z_offset": -20.0, "approach": 80.0 }
+}

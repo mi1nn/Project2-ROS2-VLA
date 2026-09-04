@@ -15,7 +15,7 @@ from object_detection.realsense import ImgNode
 # 설정
 # =========================================================
 
-MODEL_PATH = "/ros2_ws/src/object_detection/resource_test/epoch10.pt"
+MODEL_PATH = "/Users/min/orca/projects/Project2-ROS2-VLA/src/kit_detection_test/model/Yolo26_best.pt"
 
 CONF = 0.25
 IMGSZ = 960

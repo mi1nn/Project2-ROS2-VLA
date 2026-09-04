@@ -209,6 +209,8 @@ tempCodeRunnerFile.py
 # PyPI configuration file
 .pypirc
 
+kit_detection_test
+
 # Marimo
 marimo/_static/
 marimo/_lsp/
