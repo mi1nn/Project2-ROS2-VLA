@@ -9,6 +9,11 @@ from kit_interfaces.msg import (
 
 from pymongo.errors import PyMongoError
 
+from kit_db.config import MongoDBConfig
+from kit_db.mongodb import MongoDB, MongoRepository
+from kit_db.persistence import PersistenceService
+
+config = MongoDBConfig.from_environment()
 
 class DBNode(Node):
     def __init__(self, persistence, mongodb):
@@ -82,3 +87,43 @@ class DBNode(Node):
 
     def close(self):
         self._mongodb.close()
+
+
+def main(args=None):
+    rclpy.init(args=args)
+
+    mongodb = None
+    node = None
+
+    try:
+        # 환경변수에서 설정 로드
+        config = MongoDBConfig.from_environment()
+
+        # MongoDB 생성 및 연결 확인
+        mongodb = MongoDB(config)
+        mongodb.ping()
+
+        # 의존성 조립
+        mongo_repository = MongoRepository(mongodb)
+        persistence = PersistenceService(mongo_repository)
+
+        # 생성된 객체를 DBNode에 전달
+        node = DBNode(
+            persistence=persistence,
+            mongodb=mongodb,
+        )
+        
+        rclpy.spin(node)
+
+    except KeyboardInterrupt:
+        pass
+
+    finally:
+        # 종료 처리
+        if node is not None:
+            node.close()
+            node.destroy_node()
+        elif mongodb is not None:
+            mongodb.close()
+
+        rclpy.shutdown()
