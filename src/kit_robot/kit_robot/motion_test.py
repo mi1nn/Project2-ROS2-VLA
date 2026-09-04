@@ -6,6 +6,10 @@ from .motion import Motion
 
 ROBOT_ID = "dsr01"
 ROBOT_MODEL = "m0609"
+PICK_TARGET_POSE = [300, -100, 300.0, 0, 180.0, 0]
+PICK_VEL = 100.0
+PICK_ACC = 200.0
+APPROACH_HEIGHT = 100.0
 
 
 def main(args=None):
@@ -22,35 +26,41 @@ def main(args=None):
 
     motion = Motion(node)
 
-    motions = [
-        ("home", motion.home),
-        ("pick_camera", motion.pick_camera),
-        ("place_camera", motion.place_camera),
-    ]
+    if not motion.rg.connected:
+        raise ConnectionError("RG2 is not connected")
 
-    node.get_logger().info("motion library test start")
+    node.get_logger().info("pick motion test start")
 
-    for name, move_function in motions:
-        position = motion.positions[name]["pos"]
+    motion.home()
 
-        answer = input(
-            f"Move to {name} {position}? [y/N]: "
-        ).strip().lower()
+    target_pose = PICK_TARGET_POSE.copy()
+    approach_pose = target_pose.copy()
+    approach_pose[2] += APPROACH_HEIGHT
 
-        if answer != "y":
-            node.get_logger().warning("motion test stopped")
-            break
+    print(f"pick target   : {target_pose}")
+    print(f"approach pose : {approach_pose}")
 
-        node.get_logger().info(f"move to {name}")
+    answer = input("Run pick motion? [y/N]: ").strip().lower()
+    if answer != "y":
+        node.get_logger().warning("pick motion test cancelled")
+        rclpy.shutdown()
+        return
 
-        result = move_function()
+    success = motion.pick(
+        target_pose,
+        vel=PICK_VEL,
+        acc=PICK_ACC,
+        approach_height=APPROACH_HEIGHT,
+    )
 
-        if result != 0:
-            raise RuntimeError(
-                f"{name} motion failed: result={result}"
-            )
+    if success:
+        node.get_logger().info("pick succeeded")
+    else:
+        node.get_logger().warning("pick failed: gripper width <= 13 mm")
 
-        node.get_logger().info(f"complete move {name}")
+    answer = input("Open gripper after test? [y/N]: ").strip().lower()
+    if answer == "y":
+        motion.rg.open_gripper()
         time.sleep(2.0)
 
     rclpy.shutdown()
