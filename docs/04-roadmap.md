@@ -1,6 +1,6 @@
 # 04. 개발 로드맵 — 10일 스프린트
 
-관련 문서: [01 아키텍처](01-architecture.md) · [02 인터페이스 계약](02-interfaces.md) · [03 시스템 플로우](03-system-flow.md)
+관련 문서: [01 아키텍처](01-architecture.md) · [02 인터페이스 계약](02-interfaces.md) · [03 시스템 플로우](03-system-flow.md) · [05 데이터베이스](05-database.md)
 
 **기간 가정:** 2026-09-02 착수, **2026-09-11 완성 목표** (10일). 이 전제로 아래 일정을 짰다.
 
@@ -10,15 +10,15 @@
 
 | Day | 날짜 | 작업 | 완료 판정 |
 | --- | --- | --- | --- |
-| 1 | 09-02 (수) | 패키지 4개 스캐폴딩. **`kit_interfaces` srv/msg 확정 후 팀 공유**. `ros2 topic list \| grep dsr` 로 로봇 상태 토픽 확인 | `colcon build` 통과, `ros2 interface show` 로 6개 타입 확인 |
+| 1 | 09-02 (수) | 패키지 5개 스캐폴딩. **`kit_interfaces` srv/msg 확정 후 팀 공유**. `ros2 topic list \| grep dsr` 로 로봇 상태 토픽 확인 | `colcon build` 통과, `ros2 interface show` 로 8개 타입 확인 |
 | 2 | 09-03 (목) | `ImgNode` 이식, `/detection/objects` **mock 발행** + `position_estimation` 골격 | `topic echo` + `service call` 왕복 성공 |
 | 3 | 09-04 (금) | **hand-eye 캘리브레이션 재수행**, `T_gripper2camera.npy` 산출·검증 | `verify.py` 재투영 오차 확인 |
 | 4 | 09-05 (토) | `motion.py`: `init` / `home` / `pick` / `place`, RG2 연동 | 손으로 입력한 좌표로 파지 성공 |
 | 5 | 09-06 (일) | 좌표 파이프라인 결선(무게중심+깊이+역투영 + **mask 최소폭 축 기반 `rz` 계산**). 실제 YOLO seg 모델 투입 | 1개 품목 자동 파지 성공. 회전 정렬은 실패해도 `rz` 폴백([03 §4.2](03-system-flow.md))으로 진행 |
-| 6 | 09-07 (월) | `controller`: **Component flatten + 실행 루프** + 상태머신 + `/kit/task_status` | 3 Component 연속 파지·배치 |
-| 7 | 09-08 (화) | 음성/LLM 노드 결합, `/inspect_kit` 재검사 구현 | E2E 1회 관통 |
+| 6 | 09-07 (월) | `controller`: **Component flatten + 실행 루프** + 상태머신 + `/kit/task_status`, `/kit/component_result` | 3 Component 연속 파지·배치 및 결과 발행 |
+| 7 | 09-08 (화) | 음성/LLM 노드와 `/kit/command_result` 결합, `/inspect_kit` 재검사 구현 | E2E 1회 관통 |
 | 8 | 09-09 (수) | 재시도·실패 처리, `grasp_params.json` 품목별 튜닝 | 품목별 파지율 측정치 확보 |
-| 9 | 09-10 (목) | E2E 20회 시험, 실패 로그 분석·개선 | 평가 결과표 |
+| 9 | 09-10 (목) | `kit_db` 결선, E2E 20회 시험, 실패 로그·재고 차감 분석 | 세 MongoDB 컬렉션 적재, 중복 없는 재고 차감, 평가 결과표 |
 | 10 | 09-11 (금) | 버퍼 / 문서 정리 / 시연 영상 | — |
 
 ---
@@ -65,10 +65,10 @@ reference/corecode/Calibration_Tutorial/
 
 ```
 src/kit_interfaces/{CMakeLists.txt, package.xml, msg/, srv/}
-src/kit_vision/,  src/kit_voice/,  src/kit_robot/
+src/kit_vision/,  src/kit_voice/,  src/kit_robot/,  src/kit_db/
 ```
 
-`kit_interfaces` 는 `reference/cobot2/yolo_container/od_msg/` 구조를 베끼되, `std_msgs`/`builtin_interfaces` 의존 선언을 추가한다 (레퍼런스 `od_msg` 는 기본 타입만 써서 이게 없다). 나머지 세 패키지는 `ros2 pkg create --build-type ament_python` 로 만들고 빈 노드를 넣어 실행만 되게 한다 — `kit_robot` 은 노드 둘(`controller`, `position_estimation`)이다.
+`kit_interfaces` 는 `reference/cobot2/yolo_container/od_msg/` 구조를 베끼되, `std_msgs`/`builtin_interfaces` 의존 선언을 추가한다 (레퍼런스 `od_msg` 는 기본 타입만 써서 이게 없다). 나머지 네 패키지는 `ament_python`으로 구성하고 빈 노드를 넣어 실행만 되게 한다 — `kit_robot`은 노드 둘(`controller`, `position_estimation`)이고 `kit_db`는 `db_node`를 둔다.
 
 **끝나면 즉시 팀에 srv/msg 를 공유한다.** 이게 오늘의 진짜 산출물이다.
 
@@ -106,7 +106,7 @@ src/kit_vision/,  src/kit_voice/,  src/kit_robot/
 
 ### Day 7 — 통합
 
-음성 노드 결합 + `/inspect_kit`. 검사 자세는 관찰 자세와 다를 수 있다(키팅 트레이를 봐야 함) — 별도 자세로 정의한다.
+음성 노드 결합 + `/inspect_kit`. 명령 해석·검증이 끝나면 성공 여부와 관계없이 `/kit/command_result`를 발행한다. 검사 자세는 관찰 자세와 다를 수 있다(키팅 트레이를 봐야 함) — 별도 자세로 정의한다.
 
 ### Day 8 — 튜닝
 
@@ -114,7 +114,7 @@ src/kit_vision/,  src/kit_voice/,  src/kit_robot/
 
 ### Day 9 — 평가
 
-E2E 20회. 기획서의 정량 평가 항목(파지 성공률, E2E 성공률, 연속 성공 횟수)을 채운다. 실패는 `/kit/task_status` 의 `detail` 로 남으므로 `ros2 bag record /kit/task_status` 를 켜두고 돌린다.
+`kit_db`를 세 토픽에 연결한 뒤 E2E 20회를 수행한다. 기획서의 정량 평가 항목(파지 성공률, E2E 성공률, 연속 성공 횟수)을 MongoDB 기록으로 계산한다. 최초 `SUCCESS` Component만 PostgreSQL 재고가 1개 감소하고, 동일 메시지 재발행·`FAILED`·`SKIPPED`에서는 재고가 변하지 않는지 함께 검증한다. 필요하면 `ros2 bag record /kit/command_result /kit/task_status /kit/component_result`로 원본 이벤트를 보존한다.
 
 ### Day 10 — 버퍼
 

@@ -1,6 +1,6 @@
 # 02. 인터페이스 계약 (`kit_interfaces`)
 
-관련 문서: [01 아키텍처](01-architecture.md) · [03 시스템 플로우](03-system-flow.md)
+관련 문서: [01 아키텍처](01-architecture.md) · [03 시스템 플로우](03-system-flow.md) · [05 데이터베이스](05-database.md)
 
 이 문서가 팀 간 유일한 공식 계약이다. 노드 내부 구현은 각자 자유지만, 여기 정의된 srv/msg 를 우회해서 남의 패키지 코드를 직접 import 하지 않는다.
 
@@ -36,6 +36,8 @@ kit_interfaces/
   msg/
     DetectedObject.msg
     DetectionArray.msg
+    CommandResult.msg
+    ComponentResult.msg
     TaskStatus.msg
   srv/
     GetComponentPose.srv
@@ -49,6 +51,8 @@ kit_interfaces/
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/DetectedObject.msg"
   "msg/DetectionArray.msg"
+  "msg/CommandResult.msg"
+  "msg/ComponentResult.msg"
   "msg/TaskStatus.msg"
   "srv/GetComponentPose.srv"
   "srv/InspectKit.srv"
@@ -57,7 +61,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
 )
 ```
 
-`DetectionArray.msg` 가 `std_msgs/Header` 를, `TaskStatus.msg` 가 `builtin_interfaces/Time` 을 쓰므로 `DEPENDENCIES` 선언과 `package.xml` 의 `<depend>` 가 필요하다. 레퍼런스 `od_msg` 는 기본 타입만 써서 이게 없었다.
+`DetectionArray.msg`가 `std_msgs/Header`를, 세 DB 이벤트 메시지가 `builtin_interfaces/Time`을 쓰므로 `DEPENDENCIES` 선언과 `package.xml` 의 `<depend>` 가 필요하다. 레퍼런스 `od_msg` 는 기본 타입만 써서 이게 없었다.
 
 같은 패키지 안의 msg 를 참조할 때는 패키지명 없이 타입명만 쓴다 — `DetectionArray.msg` 의 `DetectedObject[] objects`, `GetComponentPose.srv` 의 `DetectedObject source` 가 그 경우다.
 
@@ -144,8 +148,8 @@ string         error_code       # 아래 표 참조
 | `""` | 성공 | 파지 진행 |
 | `not_detected` | 해당 클래스가 검출에 없음 | 관찰 자세 재정착 후 재요청 |
 | `stale` | 검출이 `max_age_sec` 보다 오래됨 | 정착 대기 후 재요청 |
-| `out_of_workspace` | 변환 좌표가 작업영역 밖 | **움직이지 않는다.** 건너뛰고 기록 |
-| `no_candidate` | 후보가 `exclude_taken` 으로 전부 소진 | 건너뛰고 `missing` 기록 |
+| `out_of_workspace` | 변환 좌표가 작업영역 밖 | **움직이지 않는다.** `FAILED`로 기록하고 다음 Component 진행 |
+| `no_candidate` | 후보가 `exclude_taken`으로 전부 소진 | `FAILED`로 기록하고 최종 검사에서 `missing` 확인 |
 
 ### 2.5 현재 posx 를 request 로 넘기는 이유
 
@@ -212,10 +216,11 @@ string error_code
 레퍼런스가 `std_srvs/Trigger` 를 쓰던 자리인데, 응답 구조가 달라서 전용 srv 로 만든다.
 
 **`task_id`.** MongoDB `commands`/`kit_executions`/`component_executions` 세 컬렉션을 하나의
-작업으로 묶는 키다([db_table_collection.md](db_table_collection.md) ID 체계). `controller` 가
+작업으로 묶는 키다([05 데이터베이스](05-database.md) ID 체계). `controller` 가
 `IDLE → LISTEN` 진입 시(이 서비스를 호출하는 유일한 지점) 생성해서 요청에 실어 보낸다.
-`command_node` 는 응답을 만들 때 이 값을 그대로 `command_json` 에 심어 돌려주므로, 이후 DB 기록
-단계에서 재발급하지 않고 요청 시점의 값을 계속 쓴다.
+`command_node` 는 응답과 `/kit/command_result`에 이 값을 그대로 사용하므로, 이후 DB 기록
+단계에서 재발급하지 않고 요청 시점의 값을 계속 쓴다. `command_json` 내부에는 실행 명령인
+`kit_type`과 `items`만 넣고, `task_id`와 `raw_text`는 `CommandResult`의 별도 필드로 전달한다.
 
 > **웨이크워드 감지 범위 — 팀원과 확인 필요.** controller 는 `LISTEN` 상태에서만 이 서비스를 호출하고, 요청을 하나 보낸 뒤 응답이 올 때까지 다음 요청을 보내지 않는다. 즉 `VALIDATE`~`REPORT` 구간에는 이 서비스 자체를 호출하지 않으므로, **`command_node` 의 웨이크워드 감지가 이 서비스 콜백 안에서만 동작한다는 전제**하에 실행 중 발화가 자동으로 무시된다. 만약 `command_node` 가 요청 유무와 무관하게 백그라운드로 항상 마이크를 열어놓는 구조라면, EXECUTE 중 발화가 어딘가에 버퍼링됐다가 다음 `LISTEN` 에서 갑자기 튀어나올 수 있다 — 이 경우 계약을 다시 봐야 한다.
 
@@ -227,15 +232,13 @@ string error_code
   "items": [
     {"name": "cup_ramen", "qty": 2},
     {"name": "mask",      "qty": 1}
-  ],
-  "raw_text": "지진 키트로 컵라면 두 개랑 마스크 하나 담아줘",
-  "task_id": "..."
+  ]
 }
 ```
 
 - `name` 은 반드시 `class_names.json` 에 존재하는 클래스여야 한다. **검증 책임은 음성 노드에 있다.** LLM 출력을 그대로 흘리지 않는다 (기획서의 "명령 검증기" 가 이 지점이다).
 - `qty` 는 1 이상 정수.
-- `raw_text` 는 DB 기록·디버깅용. 로봇은 쓰지 않는다.
+- `raw_text`는 `command_json`이 아니라 `CommandResult.raw_text`에 담아 DB 기록·디버깅에 사용한다.
 - JSON 파싱 실패나 스키마 위반은 **로봇 쪽에서도 한 번 더 방어한다.** 신뢰 경계이므로 양쪽에서 검증한다.
 
 **`error_code`** (success=false 일 때):
@@ -251,41 +254,78 @@ string error_code
 
 이 코드 체계는 레퍼런스 `get_keyword.py` 가 이미 쓰던 것을 그대로 승계한다. 크레딧 소진과 레이트 리밋을 구분하는 게 실전에서 유효했다 — 전자는 기다려도 안 풀린다.
 
-> **[열린 이슈 — DB 담당 팀원 확인 필요] `kit_type` → 레시피 자동 조회.**
-> 지금은 LLM이 발화에서 `kit_type` 과 `items` 를 함께 추출하는데, `items` 처럼 `class_names.json` 대조 검증이 있는 것과 달리 `kit_type` 은 검증 파일이 없어 자유생성 문자열이 그대로 통과한다. "지진 키트 조립해줘"처럼 `kit_type` 만 말해도 미리 정의된 품목 구성(컵라면 2개, 마스크 1개 등)으로 `items` 를 채우는 방향이 논의됐다 — 다만 [05 DB 전체 구조](05-db-전체-구조.md)에 정의된 3개 컬렉션(`commands`/`kit_executions`/`component_executions`)에는 아직 이 kit_type→품목 매핑(레시피) 자체를 담을 테이블/컬렉션이 없다. 실제 스키마·조회 방식은 DB 담당 팀원이 확정한다.
+> **[열린 이슈] `kit_type` → 레시피 자동 조회.**
+> 지금은 LLM이 발화에서 `kit_type`과 `items`를 함께 추출한다. [05 데이터베이스](05-database.md)는 작업 레시피를 저장 범위에서 제외하므로, `kit_type`만으로 품목을 채우는 기능이 필요해지면 DB 스키마와 분리된 설정 파일 또는 별도 서비스 계약을 추가로 정해야 한다.
 
 ---
 
-## 4. 상태 발행 (로봇 → DB/UI)
+## 4. DB 저장 이벤트
 
-### 4.1 `msg/TaskStatus.msg`
+DB 노드는 아래 세 토픽을 구독한다. MongoDB 필드 매핑, 검증 및 재고 차감 정책은
+[05 데이터베이스](05-database.md)를 따른다.
+
+### 4.1 `msg/CommandResult.msg` (음성 → DB)
 
 ```
-string task_id                 # 작업 1회의 UUID
-string state                   # 상위 상태머신 (03 문서 2절)
-string kit_type
-string component               # 지금 처리 중인 Component 이름. 없으면 빈 문자열
-int32  component_index         # 0-based
-int32  component_total         # flatten 후 Component 개수 (수량이 펼쳐진 값)
-int32  attempt                 # 이 Component 의 시도 횟수 (1-based)
-string component_state         # PENDING | DONE | SKIPPED
-string detail                  # 사람이 읽는 부가 설명 / 실패 사유(error_code)
+string task_id
+bool success
+string raw_text
+string command_json
+string validation_result
+string error_code
+string detail
 builtin_interfaces/Time stamp
 ```
 
-토픽: `/kit/task_status`, QoS 는 기본 `depth=10` reliable.
+토픽은 `/kit/command_result`다. 명령 해석과 검증이 끝날 때 성공·실패 모두 발행한다.
+성공 시 `command_json`은 비어 있지 않은 JSON 객체여야 한다.
 
-**`component_total` 은 flatten 후 개수다.** 레시피가 "컵라면 2 + 마스크 1" 이면 3 이지 2 가 아니다. 진행률을 Component 단위로 보여야 실제 작업량과 맞는다 ([03 문서 3.1절](03-system-flow.md)).
+### 4.2 `msg/TaskStatus.msg` (로봇 → DB/UI)
 
-`attempt` 와 `component_state` 를 담는 이유: 재시도가 Component 안에서 일어나므로, 이 둘이 없으면 DB 에 "성공/실패" 만 남고 **몇 번 만에 됐는지**가 사라진다. 기획서의 정량 평가 항목(품목별 파지 성공률)을 채우려면 시도 횟수가 필요하다.
+```
+string task_id
+string state                   # 상위 상태머신 (03 문서 2절)
+string task_status             # RUNNING | SUCCESS | FAILED
+string kit_type
+string current_component       # 지금 처리 중인 Component 이름. 없으면 빈 문자열
+int32  current_component_index # 0-based
+int32  component_total         # flatten 후 Component 개수
+string inspection_result       # 최종 검사 JSON. 검사 전에는 빈 문자열
+string error_code
+string detail
+builtin_interfaces/Time stamp
+```
 
-### 4.2 DB 를 직접 건드리지 않는다
+토픽은 `/kit/task_status`, QoS는 기본 `depth=10` reliable이다. `component_total`은
+flatten 후 개수다. `inspection_result`는 `result`, `expected_counts`, `actual_counts`,
+`missing`, `unexpected`, `detection_age`, `inspected_at`을 포함하는 JSON이다.
 
-기획서에 PostgreSQL 적재 요구가 있지만, **로봇 노드는 DB 를 모른다.** `/kit/task_status` 를 발행할 뿐이고 DB 담당 팀원이 이 토픽을 구독해 적재한다.
+### 4.3 `msg/ComponentResult.msg` (로봇 → DB)
 
-이유는 두 가지다. 첫째, DB 가 죽거나 느릴 때 로봇이 멈추면 안 된다. 물리적으로 움직이는 장비에 blocking I/O 를 물리지 않는다. 둘째, DB 스키마 변경이 로봇 코드 변경으로 번지지 않는다.
+```
+string task_id
+int32 component_index
+int32 component_total
+string component
+string slot
+string status                  # SUCCESS | FAILED | SKIPPED
+int32 attempt_count
+string attempts_json           # Attempt 배열 JSON
+string error_code
+string detail
+builtin_interfaces/Time started_at
+builtin_interfaces/Time ended_at
+```
 
-레퍼런스 `robot_control.py` 의 `/ui/current_task` (`std_msgs/String` 에 JSON 을 넣던 방식) 를 타입 있는 msg 로 승격한 것이다. String+JSON 은 필드 오타가 런타임까지 안 잡힌다.
+토픽은 `/kit/component_result`다. Component가 최종 종료될 때 한 번 발행한다.
+재시도 상세는 `attempts_json` 배열로 보존하며, 최초 저장된 `SUCCESS`만 재고 차감 대상이다.
+
+### 4.4 로봇 노드는 DB를 직접 건드리지 않는다
+
+로봇 노드는 `/kit/task_status`와 `/kit/component_result`를 발행할 뿐이고 `kit_db`의
+`db_node`가 이를 구독해 적재한다. 음성 노드도 같은 원칙으로 `/kit/command_result`만
+발행한다. DB가 죽거나 느려도 로봇의 물리 동작을 blocking하지 않고, DB 스키마 변경이
+로봇 코드로 번지는 것을 막는다.
 
 ---
 
@@ -309,6 +349,8 @@ ros2 service call /get_command kit_interfaces/srv/GetCommand "{}"
 
 # 상태 발행 확인
 ros2 topic echo /kit/task_status
+ros2 topic echo /kit/command_result
+ros2 topic echo /kit/component_result
 
 # Day 1 확인 항목: 로봇 상태 토픽이 실제로 있는지 (2.5절)
 ros2 topic list | grep dsr

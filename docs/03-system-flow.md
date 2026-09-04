@@ -23,9 +23,10 @@ sequenceDiagram
 
     C->>V: /get_command
     U->>V: "Hello Rokey" + 음성 명령
+    V->>DB: /kit/command_result (CommandResult)
     V-->>C: command_json {kit_type, items[]}
     C->>C: 검증 → Component 리스트로 flatten
-    C->>DB: /kit/task_status (VALIDATE)
+    C->>DB: /kit/task_status (RUNNING, VALIDATE)
 
     C->>R: motion.home() — 관찰 자세 + 정착 대기
 
@@ -33,14 +34,15 @@ sequenceDiagram
         C->>P: /get_component_pose (component, robot_posx, max_age_sec)
         P->>P: 최신성 검사 → hand-eye 변환<br/>z_offset → 작업영역 검사 → 후보 선정
         P-->>C: target_pose + source + detection_age
-        C->>DB: /kit/task_status (EXECUTE, i/n)
+        C->>DB: /kit/task_status (RUNNING, EXECUTE, i/n)
         C->>R: motion.pick() → motion.place()
+        C->>DB: /kit/component_result (SUCCESS/FAILED/SKIPPED)
     end
 
     C->>R: 검사 자세 이동 + 정착 대기
     C->>P: /inspect_kit (기대 품목/수량)
     P-->>C: ok, missing[], unexpected[], actual_counts[]
-    C->>DB: /kit/task_status (DONE 또는 FAILED)
+    C->>DB: /kit/task_status (SUCCESS 또는 FAILED, inspection_result)
 ```
 
 주목할 점 둘.
@@ -80,7 +82,7 @@ stateDiagram-v2
 | `OBSERVE` | 검증 통과 | 관찰 자세 이동 + **정착 대기**, `robot_posx` 캡처 | `EXECUTE` | 이동 실패 시 `REPORT` |
 | `EXECUTE` | 관찰 자세 도달 | Component 를 하나씩 `execute_component()` | 전부 처리 시 `INSPECT` | Component 개별 실패는 흡수 |
 | `INSPECT` | 전 Component 처리 | 검사 자세 이동 + 정착, `/inspect_kit` | `REPORT` | 검사 실패도 `REPORT` (결과에 기록) |
-| `REPORT` | 검사 완료 | 최종 `TaskStatus` 발행 (DONE/FAILED) | `IDLE` | — |
+| `REPORT` | 검사 완료 | 최종 `TaskStatus` 발행 (`SUCCESS`/`FAILED`) | `IDLE` | — |
 
 **정착 대기(settle)가 상태로 드러나는 이유:** eye-in-hand 라서 팔이 멈춘 뒤에 찍힌 프레임이어야 좌표가 맞는다. `mwait()` 만으로는 부족하고, 검출 파이프라인이 새 프레임을 한 바퀴 도는 시간이 더 필요하다. 이걸 코드 어딘가의 `sleep` 으로 묻지 않고 상태 진입 조건으로 명시한다.
 
@@ -99,13 +101,13 @@ class Component:
     slot: str                  # 배치 슬롯
     index: int                 # 실행 순번
     attempts: int = 0
-    state: str = "PENDING"     # PENDING | DONE | SKIPPED
+    state: str = "PENDING"     # PENDING | SUCCESS | FAILED | SKIPPED
     fail_reason: str = ""
 ```
 
 `{"cup_ramen": 2, "mask": 1}` → Component **3개**.
 
-수량 2 는 Component 2개다. **실행 루프에서 수량 개념이 사라지고 균일한 리스트가 된다.** 이게 요점이다 — 루프가 "이 품목을 몇 개째 집는 중인지" 를 세지 않으므로, 부분 실패 처리가 단순해진다. 3개 중 2번째만 실패하면 그 Component 만 `SKIPPED` 가 되고 나머지는 영향이 없다.
+수량 2 는 Component 2개다. **실행 루프에서 수량 개념이 사라지고 균일한 리스트가 된다.** 이게 요점이다 — 루프가 "이 품목을 몇 개째 집는 중인지" 를 세지 않으므로, 부분 실패 처리가 단순해진다. 3개 중 2번째만 실패하면 그 Component만 `FAILED`가 되고 나머지는 영향이 없다.
 
 ### 3.2 실행 루프
 
@@ -129,7 +131,7 @@ def execute_component(self, comp) -> bool:
             if res.error_code in ("stale", "not_detected"):
                 self.motion.home(); self.settle()   # 재정착 후 재시도
                 continue
-            comp.state, comp.fail_reason = "SKIPPED", res.error_code
+            comp.state, comp.fail_reason = "FAILED", res.error_code
             return False                       # out_of_workspace 등은 재시도 무의미
 
         params = grasp.params(comp.name)
@@ -138,10 +140,10 @@ def execute_component(self, comp) -> bool:
             continue
 
         self.motion.place(comp.slot, params)
-        comp.state = "DONE"
+        comp.state = "SUCCESS"
         return True
 
-    comp.state, comp.fail_reason = "SKIPPED", "max_attempts"
+    comp.state, comp.fail_reason = "FAILED", "max_attempts"
     return False
 ```
 
@@ -381,4 +383,4 @@ def place(slot_name, params):
 
 - 검사 결과 기반 **자동 보정** (누락 품목 추가 파지, 오투입 품목 방출) — `InspectKit` 응답의 `missing`/`unexpected` 가 이미 필요한 정보를 담고 있고, 보정도 결국 Component 실행이다. `missing` 을 Component 리스트로 다시 flatten 해서 `EXECUTE` 를 한 번 더 도는 것으로 붙는다.
 - **3차원 형상 기반 파지점** — 현재는 mask 무게중심(xy) + mask 최소폭 축(rz, [§4.2](#42-단계별-상세)) + 수직 하향(rx,ry) 조합이다. 물체가 기울어진 채로 놓였을 때의 완전한 3D 파지 자세(포인트클라우드 기반)는 별개 작업으로 남긴다.
-- **DB 세부 관리** — 로봇은 `/kit/task_status` 발행까지만 책임진다.
+- **DB 분석 기능 확장** — 현재 로봇은 `/kit/task_status`와 `/kit/component_result`를 발행하고, 음성 노드는 `/kit/command_result`를 발행한다. DB 노드는 이를 저장하고 신규 `SUCCESS` Component의 재고를 차감한다. 집계 대시보드나 장기 분석 기능은 확장 범위다.
