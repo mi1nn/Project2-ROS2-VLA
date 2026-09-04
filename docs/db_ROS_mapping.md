@@ -109,6 +109,76 @@
     - attempts_json은 반드시 JSON 배열
     - SKIPPED이고 시도하지 않았다면 []
 
+- attempts_json은 리스트 안에 다음과 같은 항목을 채운 json 데이터를 포함해서 보낸다.
+    - 중간에 얻지 못한 데이터는 `null`로 비워둔 채 전송한다.
+```
+[
+  {
+    "attempt_no": 1,
+    "status": "FAILED",
+    "detection": {
+      "score": 0.82,
+      "camera_xyz": [31.2, -22.4, 518.0],
+      "centroid_px": [314, 228],
+      "detection_age": 0.21
+    },
+    "target_pose": [
+      421.1,
+      -125.2,
+      91.3,
+      0.0,
+      180.0,
+      0.0
+    ],
+    "grasp": {
+      "success": false,
+      "gripper_width": 0.0
+    },
+    "release": null,
+    "error_code": "empty_grasp",
+    "started_at": "2026-09-03T01:20:31.421Z",
+    "ended_at": "2026-09-03T01:20:35.182Z"
+  },
+  {
+    "attempt_no": 2,
+    "status": "SUCCESS",
+    "detection": {
+      "score": 0.91,
+      "camera_xyz": [33.8, -20.1, 515.0],
+      "centroid_px": [318, 226],
+      "detection_age": 0.18
+    },
+    "target_pose": [
+      423.5,
+      -122.9,
+      89.1,
+      0.0,
+      180.0,
+      0.0
+    ],
+    "grasp": {
+      "success": true,
+      "gripper_width": 37.4
+    },
+    "release": {
+      "pose": [
+        520.0,
+        -160.0,
+        120.0,
+        0.0,
+        180.0,
+        0.0
+      ],
+      "slot": "slot_1",
+      "success": true
+    },
+    "error_code": null,
+    "started_at": "2026-09-03T01:20:36.104Z",
+    "ended_at": "2026-09-03T01:20:42.528Z"
+  }
+]
+```
+
 #### 저장 정책 :
 
 - Component는 task_id + component_index로 식별
