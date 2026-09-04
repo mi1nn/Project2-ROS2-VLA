@@ -8,7 +8,7 @@ from pymongo.errors import PyMongoError
 import pytest
 from rclpy.node import Node
 
-from kit_db.db_node import DBNode
+from kit_db.db_node import DBNode, main
 
 
 @pytest.fixture
@@ -134,3 +134,86 @@ def test_close_releases_mongodb_connection(node_dependencies):
     node.close()
 
     mongodb.close.assert_called_once_with()
+
+
+@pytest.fixture
+def lifecycle_dependencies():
+    with (
+        patch('kit_db.db_node.rclpy.init') as init,
+        patch('kit_db.db_node.rclpy.spin') as spin,
+        patch('kit_db.db_node.rclpy.shutdown') as shutdown,
+        patch(
+            'kit_db.db_node.MongoDBConfig.from_environment'
+        ) as load_config,
+        patch('kit_db.db_node.MongoDB') as mongodb_class,
+        patch('kit_db.db_node.MongoRepository') as repository_class,
+        patch('kit_db.db_node.PersistenceService') as service_class,
+        patch('kit_db.db_node.DBNode') as node_class,
+    ):
+        yield SimpleNamespace(
+            init=init,
+            spin=spin,
+            shutdown=shutdown,
+            load_config=load_config,
+            mongodb_class=mongodb_class,
+            repository_class=repository_class,
+            service_class=service_class,
+            node_class=node_class,
+        )
+
+
+def test_main_wires_dependencies_and_spins(lifecycle_dependencies):
+    dependencies = lifecycle_dependencies
+    config = Mock()
+    dependencies.load_config.return_value = config
+    mongodb = dependencies.mongodb_class.return_value
+    repository = dependencies.repository_class.return_value
+    persistence = dependencies.service_class.return_value
+    node = dependencies.node_class.return_value
+
+    main(args=['--ros-args'])
+
+    dependencies.init.assert_called_once_with(args=['--ros-args'])
+    dependencies.load_config.assert_called_once_with()
+    dependencies.mongodb_class.assert_called_once_with(config)
+    mongodb.ping.assert_called_once_with()
+    dependencies.repository_class.assert_called_once_with(mongodb)
+    dependencies.service_class.assert_called_once_with(repository)
+    dependencies.node_class.assert_called_once_with(
+        persistence=persistence,
+        mongodb=mongodb,
+    )
+    dependencies.spin.assert_called_once_with(node)
+    node.close.assert_called_once_with()
+    node.destroy_node.assert_called_once_with()
+    dependencies.shutdown.assert_called_once_with()
+
+
+def test_main_cleans_up_after_keyboard_interrupt(lifecycle_dependencies):
+    dependencies = lifecycle_dependencies
+    mongodb = dependencies.mongodb_class.return_value
+    node = dependencies.node_class.return_value
+    dependencies.spin.side_effect = KeyboardInterrupt
+
+    main()
+
+    mongodb.ping.assert_called_once_with()
+    node.close.assert_called_once_with()
+    node.destroy_node.assert_called_once_with()
+    dependencies.shutdown.assert_called_once_with()
+
+
+def test_main_closes_mongodb_when_ping_fails(lifecycle_dependencies):
+    dependencies = lifecycle_dependencies
+    mongodb = dependencies.mongodb_class.return_value
+    mongodb.ping.side_effect = PyMongoError('connection failed')
+
+    with pytest.raises(PyMongoError, match='connection failed'):
+        main()
+
+    mongodb.close.assert_called_once_with()
+    dependencies.repository_class.assert_not_called()
+    dependencies.service_class.assert_not_called()
+    dependencies.node_class.assert_not_called()
+    dependencies.spin.assert_not_called()
+    dependencies.shutdown.assert_called_once_with()
