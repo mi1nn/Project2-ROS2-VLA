@@ -1,5 +1,0 @@
-string task_id   # 작업 1회 식별자. controller 가 생성해 요청에 담는다.
----
-bool   success
-string command_json
-string error_code
