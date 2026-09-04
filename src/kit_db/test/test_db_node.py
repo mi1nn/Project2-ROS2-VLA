@@ -5,6 +5,7 @@ from unittest.mock import call, Mock, patch
 
 from kit_interfaces.msg import CommandResult, ComponentResult, TaskStatus
 from pymongo.errors import PyMongoError
+from psycopg2 import OperationalError
 import pytest
 from rclpy.node import Node
 
@@ -128,6 +129,22 @@ def test_callbacks_isolate_mongodb_failures(
     assert 'database unavailable' in logger.error.call_args.args[0]
 
 
+def test_component_callback_isolates_postgresql_failures(
+    node_dependencies,
+):
+    node, persistence, _, logger, _ = node_dependencies
+    message = SimpleNamespace(task_id='TASK-001')
+    persistence.record_component.side_effect = OperationalError(
+        'inventory database unavailable'
+    )
+
+    node._component_callback(message)
+
+    logger.error.assert_called_once()
+    assert 'TASK-001' in logger.error.call_args.args[0]
+    assert 'inventory database unavailable' in logger.error.call_args.args[0]
+
+
 def test_close_releases_mongodb_connection(node_dependencies):
     node, _, mongodb, _, _ = node_dependencies
 
@@ -144,9 +161,18 @@ def lifecycle_dependencies():
         patch('kit_db.db_node.rclpy.shutdown') as shutdown,
         patch(
             'kit_db.db_node.MongoDBConfig.from_environment'
-        ) as load_config,
+        ) as load_mongodb_config,
+        patch(
+            'kit_db.db_node.PostgreSQLConfig.from_environment'
+        ) as load_postgresql_config,
         patch('kit_db.db_node.MongoDB') as mongodb_class,
-        patch('kit_db.db_node.MongoRepository') as repository_class,
+        patch('kit_db.db_node.PostgreSQL') as postgresql_class,
+        patch(
+            'kit_db.db_node.MongoRepository'
+        ) as mongo_repository_class,
+        patch(
+            'kit_db.db_node.InventoryRepository'
+        ) as inventory_repository_class,
         patch('kit_db.db_node.PersistenceService') as service_class,
         patch('kit_db.db_node.DBNode') as node_class,
     ):
@@ -154,9 +180,12 @@ def lifecycle_dependencies():
             init=init,
             spin=spin,
             shutdown=shutdown,
-            load_config=load_config,
+            load_mongodb_config=load_mongodb_config,
+            load_postgresql_config=load_postgresql_config,
             mongodb_class=mongodb_class,
-            repository_class=repository_class,
+            postgresql_class=postgresql_class,
+            mongo_repository_class=mongo_repository_class,
+            inventory_repository_class=inventory_repository_class,
             service_class=service_class,
             node_class=node_class,
         )
@@ -164,21 +193,40 @@ def lifecycle_dependencies():
 
 def test_main_wires_dependencies_and_spins(lifecycle_dependencies):
     dependencies = lifecycle_dependencies
-    config = Mock()
-    dependencies.load_config.return_value = config
+    mongodb_config = Mock()
+    postgresql_config = Mock()
+    dependencies.load_mongodb_config.return_value = mongodb_config
+    dependencies.load_postgresql_config.return_value = postgresql_config
     mongodb = dependencies.mongodb_class.return_value
-    repository = dependencies.repository_class.return_value
+    postgresql = dependencies.postgresql_class.return_value
+    mongo_repository = (
+        dependencies.mongo_repository_class.return_value
+    )
+    inventory_repository = (
+        dependencies.inventory_repository_class.return_value
+    )
     persistence = dependencies.service_class.return_value
     node = dependencies.node_class.return_value
 
     main(args=['--ros-args'])
 
     dependencies.init.assert_called_once_with(args=['--ros-args'])
-    dependencies.load_config.assert_called_once_with()
-    dependencies.mongodb_class.assert_called_once_with(config)
+    dependencies.load_mongodb_config.assert_called_once_with()
+    dependencies.load_postgresql_config.assert_called_once_with()
+    dependencies.mongodb_class.assert_called_once_with(mongodb_config)
+    dependencies.postgresql_class.assert_called_once_with(
+        postgresql_config
+    )
     mongodb.ping.assert_called_once_with()
-    dependencies.repository_class.assert_called_once_with(mongodb)
-    dependencies.service_class.assert_called_once_with(repository)
+    postgresql.ping.assert_called_once_with()
+    dependencies.mongo_repository_class.assert_called_once_with(mongodb)
+    dependencies.inventory_repository_class.assert_called_once_with(
+        postgresql
+    )
+    dependencies.service_class.assert_called_once_with(
+        mongo_repository,
+        inventory_repository,
+    )
     dependencies.node_class.assert_called_once_with(
         persistence=persistence,
         mongodb=mongodb,
@@ -192,11 +240,13 @@ def test_main_wires_dependencies_and_spins(lifecycle_dependencies):
 def test_main_cleans_up_after_keyboard_interrupt(lifecycle_dependencies):
     dependencies = lifecycle_dependencies
     mongodb = dependencies.mongodb_class.return_value
+    postgresql = dependencies.postgresql_class.return_value
     node = dependencies.node_class.return_value
     dependencies.spin.side_effect = KeyboardInterrupt
 
     main()
 
+    postgresql.ping.assert_called_once_with()
     mongodb.ping.assert_called_once_with()
     node.close.assert_called_once_with()
     node.destroy_node.assert_called_once_with()
@@ -212,7 +262,27 @@ def test_main_closes_mongodb_when_ping_fails(lifecycle_dependencies):
         main()
 
     mongodb.close.assert_called_once_with()
-    dependencies.repository_class.assert_not_called()
+    dependencies.mongo_repository_class.assert_not_called()
+    dependencies.inventory_repository_class.assert_not_called()
+    dependencies.service_class.assert_not_called()
+    dependencies.node_class.assert_not_called()
+    dependencies.spin.assert_not_called()
+    dependencies.shutdown.assert_called_once_with()
+
+
+def test_main_stops_before_mongodb_when_postgresql_ping_fails(
+    lifecycle_dependencies,
+):
+    dependencies = lifecycle_dependencies
+    postgresql = dependencies.postgresql_class.return_value
+    postgresql.ping.side_effect = OperationalError('connection failed')
+
+    with pytest.raises(OperationalError, match='connection failed'):
+        main()
+
+    dependencies.mongodb_class.assert_not_called()
+    dependencies.mongo_repository_class.assert_not_called()
+    dependencies.inventory_repository_class.assert_not_called()
     dependencies.service_class.assert_not_called()
     dependencies.node_class.assert_not_called()
     dependencies.spin.assert_not_called()

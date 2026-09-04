@@ -8,8 +8,10 @@ from kit_interfaces.msg import (
 )
 
 from pymongo.errors import PyMongoError
+from psycopg2 import Error as PostgreSQLError
 
-from kit_db.config import MongoDBConfig
+from kit_db.config import MongoDBConfig, PostgreSQLConfig
+from kit_db.postgres import PostgreSQL, InventoryRepository
 from kit_db.mongodb import MongoDB, MongoRepository
 from kit_db.persistence import PersistenceService
 
@@ -59,6 +61,12 @@ class DBNode(Node):
                 f'Failed to store {message_name} '
                 f'for task {message.task_id}: {error}'
             )
+        except PostgreSQLError as error:
+            self.get_logger().error(
+                f'Failed to update inventory for '
+                f'{message_name} '
+                f'for task {message.task_id}: {error}'
+            )
 
     def _command_callback(self, message):
         self._handle_message(
@@ -95,15 +103,24 @@ def main(args=None):
 
     try:
         # 환경변수에서 설정 로드
+        Postgres_config = PostgreSQLConfig.from_environment()
         config = MongoDBConfig.from_environment()
+
+        # PostgreSQL 생성 및 연결 확인
+        postgres = PostgreSQL(Postgres_config)
+        postgres.ping()
 
         # MongoDB 생성 및 연결 확인
         mongodb = MongoDB(config)
         mongodb.ping()
 
         # 의존성 조립
+        inventory_repository = InventoryRepository(postgres)
         mongo_repository = MongoRepository(mongodb)
-        persistence = PersistenceService(mongo_repository)
+        persistence = PersistenceService(
+            mongo_repository,
+            inventory_repository,
+        )
 
         # 생성된 객체를 DBNode에 전달
         node = DBNode(
