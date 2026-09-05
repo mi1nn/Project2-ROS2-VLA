@@ -220,8 +220,11 @@ __marimo__/
 .streamlit/secrets.toml
 
 .claude
+.codex
 .serena
 .agents
+AGENTS.md
+
 skills-*
 reference
 CLAUDE.md
