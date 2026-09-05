@@ -1,0 +1,23 @@
+controller:
+  ros__parameters:
+    supported_names:
+      - 마스크
+      - 분유
+      - 샴푸리필
+      - 수세미
+      - 양갱
+      - 여행용티슈
+      - 일회용숟가락
+      - 컵라면
+      - 햄
+
+    slot_names:
+      - slot_1
+      - slot_2
+      - slot_3
+      - slot_4
+      - slot_5
+      - slot_6
+
+    service_ready_timeout_sec: 20.0
+    command_timeout_sec: 60.0
