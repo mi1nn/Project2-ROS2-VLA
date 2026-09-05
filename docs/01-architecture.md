@@ -99,7 +99,7 @@ source install/setup.bash
                         ▼                                                │
                     controller ──────────────────────────────────────────┘
                         │
-                        ├── import ──▶ motion.py ──▶ M0609 (DSR_ROBOT2) / RG2 (modbus)
+                        ├── 주입 ────▶ Motion 객체 (현재 MotionDemo, 실제 장비 연결 예정)
                         │
                         ├── /kit/task_status ────────────▶ db_node (TaskStatus)
                         └── /kit/component_result ───────▶ db_node (ComponentResult)
@@ -140,39 +140,26 @@ from DSR_ROBOT2 import movej, movel, get_current_posx, mwait, trans
 
 부수 효과가 크다 — 로봇 없이 단위 검증이 가능하고, 검출 토픽에 mock 을 물려 좌표 변환만 따로 시험할 수 있다.
 
-### 4.3 motion.py 를 라이브러리로 쓰려면 `init()` 이 필요하다
+### 4.3 Motion 객체 주입과 실제 장비 초기화
 
-레퍼런스는 위 초기화를 **모듈 최상단**에서 한다. 이 구조는 import 순서에 의존하므로 라이브러리로 못 쓴다. controller 가 `import motion` 하는 시점이 DR_init 설정보다 빠르면 조용히 깨진다.
+Controller는 `Controller(motion=...)`로 받은 객체를 사용한다. 현재 main은
+MotionDemo를 주입하며 Controller에서 DSR을 import하거나 init 함수를 호출하지 않는다.
+실제 Motion은 Controller의 7개 메서드 계약에 맞춰 구현한다([03 플로우 5절](03-system-flow.md)).
 
-명시적 초기화 함수로 감싸서 순서를 코드로 강제한다.
-
-```python
-# kit_robot/motion.py
-_api = None
-
-def init(node_id="dsr01", model="m0609"):
-    """controller 가 반드시 먼저 호출한다."""
-    global _api
-    import DR_init
-    DR_init.__dsr__id, DR_init.__dsr__model = node_id, model
-    DR_init.__dsr__node = rclpy.create_node("motion_api", namespace=node_id)
-    import DSR_ROBOT2
-    _api = DSR_ROBOT2
-
-def _require():
-    if _api is None:
-        raise RuntimeError("motion.init() 을 먼저 호출해야 한다")
-```
-
-호출을 잊으면 즉시 터진다. 조용히 틀린 좌표로 움직이는 것보다 낫다. 공개 API 목록은 [03 플로우](03-system-flow.md) 5절에 있다.
+DSR 바인딩 전에 DR_init을 구성해야 하는 순서 제약은 실제 Motion의 생성·초기화 영역에서
+해결한다. 동기 Motion 호출이 timer 안에서 실행되므로 필요한 ROS 응답 콜백이 막히지 않는지
+통합 검증이 필요하다. 실제 하드웨어 초기화와 안전 복구가 완료되었다고 가정하지 않는다.
 
 ### 4.4 파일 배치
 
 ```
 kit_robot/kit_robot/
-  controller.py            # 노드. component 실행 루프, 상태머신, /kit/task_status·/kit/component_result 발행
+  controller.py            # 노드. Enum + timer + 비동기 서비스, 실행·검사·결과 발행
+  controller_model.py      # ROS 없는 명령 검증, Component·Attempt, 공용 슬롯 할당
+  controller_demo_services.py # 테스트 전용 세 서비스 서버(삭제 예정)
+  motion_demo.py           # 실제 이동 없이 Motion 호출 계약 확인(삭제 예정)
   position_estimation.py   # 노드. 검출 구독 + hand-eye 변환 + 서비스 서버
-  motion.py                # 모듈. init / home / pick / place — controller 가 import
+  motion.py                # 실제 Motion 구현 영역. 현재 실행 진입점은 MotionDemo 사용(작업 중)
   onrobot.py               # 모듈. RG2 modbus 제어 (레퍼런스 그대로 이식)
   grasp.py                 # 모듈. 클래스별 파지 파라미터 조회
 
@@ -190,7 +177,8 @@ kit_db/kit_db/
   postgres.py              # PostgreSQL DB와 상호작용하는 모듈
 ```
 
-`motion.py`, `grasp.py`, `position_estimation.py` 의 변환 로직은 로봇 없이 단위 검증이 가능하다. 좌표 변환에는 self-check 를 붙인다([03 플로우](03-system-flow.md) 4.3절).
+`controller_model.py`는 ROS 없이 단위 검증하며 MotionDemo·데모 서비스로 상태 흐름을 확인한다.
+데모는 실제 파지와 비전 정확성을 검증하지 않는다. 실행 방법은 [06 Controller 가이드](06-controller-guide.md)를 따른다. 좌표 변환에는 self-check 를 붙인다([03 플로우](03-system-flow.md) 4.3절).
 
 ---
 

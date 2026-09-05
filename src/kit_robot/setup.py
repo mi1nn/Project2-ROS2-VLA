@@ -29,6 +29,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'controller = kit_robot.controller:main',
             'position_estimation = kit_robot.position_estimation:main',
         ],
     },

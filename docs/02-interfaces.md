@@ -149,7 +149,7 @@ string         error_code       # 아래 표 참조
 | `not_detected` | 해당 클래스가 검출에 없음 | 관찰 자세 재정착 후 재요청 |
 | `stale` | 검출이 `max_age_sec` 보다 오래됨 | 정착 대기 후 재요청 |
 | `out_of_workspace` | 변환 좌표가 작업영역 밖 | **움직이지 않는다.** `FAILED`로 기록하고 다음 Component 진행 |
-| `no_candidate` | 후보가 `exclude_taken`으로 전부 소진 | `FAILED`로 기록하고 최종 검사에서 `missing` 확인 |
+| `no_candidate` | 후보가 `exclude_taken`으로 전부 소진 | Component FAILED 후 다음 품목. 실제 부족 여부는 최종 검사로 확인 |
 
 ### 2.5 현재 posx 를 request 로 넘기는 이유
 
@@ -177,7 +177,17 @@ eye-in-hand 구성에서 가장 위험한 실패다. position_estimation 이 들
 2. request 의 `max_age_sec` — position_estimation 이 나이를 검사하고 초과 시 `stale` 반환
 3. controller 가 관찰 자세 도착 후 **정착 대기(settle)** 를 거친 뒤 요청 — 이동 직후의 프레임을 애초에 쓰지 않는다
 
-`detection_age` 를 응답에 담아 controller 가 로그에 남긴다. 조용히 넘어가는 실패를 만들지 않는다.
+Controller는 error_code=stale로 좌표 검출 노후를 처리한다. 검사 서비스의 detection_age만 검사 JSON에 기록한다.
+
+**Controller 초기 정책:** max_age_sec=1.0, 관찰·검사 정착 대기 1.2초를 사용한다.
+정착 시작은 자세 이동 완료 시점이며 응답을 받을 때까지 해당 자세를 유지한다.
+검출 stamp와 서버 시각이 동일 시간 기준이고 이동 완료 시점을 정확히 안다는 전제다.
+호스트 간 시계 오차도 0.2초 여유 이내여야 한다. 미래 stamp·시계 불일치 방어가 완료되었다고
+가정하지 않는다. 정착 시간이 허용 검출 나이보다 길도록 함께 조정하고 실기에서 검증한다.
+
+현재 서버는 촬영 시각 하한 요청이나 새 프레임 대기 기능 없이 캐시를 즉시 판정한다.
+초기 Controller는 exclude_taken=[]를 보낸다. 기존 제외 키는 픽셀 중심 문자열이므로
+여러 프레임에 걸쳐 안정적인 물체 ID로 누적하지 않는다. 서버의 기존 제외 기능은 유지한다.
 
 ### 2.7 `srv/InspectKit.srv` → `position_estimation` 이 서버
 
@@ -198,6 +208,18 @@ float64  detection_age
 서버를 `position_estimation` 에 두는 이유: 이미 `/detection/objects` 를 구독하고 있고 최신성 검사 로직도 거기 있다. 검사는 좌표가 필요 없는 단순 카운팅이지만, **최신성 판정은 똑같이 필요하다.** 같은 가드를 두 노드에 중복 구현하지 않는다.
 
 `actual_counts` 를 따로 주는 이유: `ok=false` 일 때 "0개라 없는 건지 1개만 들어간 건지" 를 구분해야 재시도 판단이 된다.
+
+**현재 구현과 Controller 판정:** InspectKit에는 success/error_code가 없다.
+검출 캐시가 없으면 ok=false, detection_age=inf이며 오래된 검출도 ok=false로 반환한다.
+나이가 유한하고 0 이상이며 요청한 max_age_sec 이내인지 먼저 확인한다. 범위를 벗어나거나 통신 timeout·future 예외·응답 형식 오류이면 ERROR다.
+유효한 응답만 ok=true → PASS, ok=false → FAIL로 해석한다.
+
+actual_counts 길이는 expected_classes와 같고 수량은 음수가 아니어야 한다.
+
+expected_classes와 expected_counts는 원래 검증된 명령에서 동일 순서로 만든다.
+실패한 Component를 기대 수량에서 빼지 않는다. Task는 검사 PASS이고 TASK_FATAL·최종 복귀 실패가 없을 때 SUCCESS다.
+
+현재 inspect_counts는 전체 검출을 세며 트레이 ROI 필터는 없다. 초기 운영에서는 검사 화면에 완성 트레이의 검사 대상 물체만 포함되도록 배치한다. 원본 물체가 함께 보이면 검사 성공 판정에 사용하기 전에 촬영 구성을 조정한다. ROI 필터 추가는 이번 범위 밖이다.
 
 ---
 
@@ -222,7 +244,10 @@ string error_code
 단계에서 재발급하지 않고 요청 시점의 값을 계속 쓴다. `command_json` 내부에는 실행 명령인
 `kit_type`과 `items`만 넣고, `task_id`와 `raw_text`는 `CommandResult`의 별도 필드로 전달한다.
 
-> **웨이크워드 감지 범위 — 팀원과 확인 필요.** controller 는 `LISTEN` 상태에서만 이 서비스를 호출하고, 요청을 하나 보낸 뒤 응답이 올 때까지 다음 요청을 보내지 않는다. 즉 `VALIDATE`~`REPORT` 구간에는 이 서비스 자체를 호출하지 않으므로, **`command_node` 의 웨이크워드 감지가 이 서비스 콜백 안에서만 동작한다는 전제**하에 실행 중 발화가 자동으로 무시된다. 만약 `command_node` 가 요청 유무와 무관하게 백그라운드로 항상 마이크를 열어놓는 구조라면, EXECUTE 중 발화가 어딘가에 버퍼링됐다가 다음 `LISTEN` 에서 갑자기 튀어나올 수 있다 — 이 경우 계약을 다시 봐야 한다.
+**웨이크워드 감지 범위 — 현재 구현 확인.** get_command 콜백 내부에서 마이크를 열어 최대 30초 동안 웨이크워드를 기다린 뒤 닫는다. Controller는 LISTEN에서 요청을 하나만 보낸다. 클라이언트 timeout은 서버 콜백 취소를 뜻하지 않으므로 아래 재시작 정책을 따른다.
+
+**반복 작업:** 응답 반환 후 음성 노드는 다음 서비스 요청을 기다린다. 스스로 웨이크워드 대기를 다시 시작하지 않는다. Controller의 VALIDATE~REPORT 동안에는 새 명령 요청이 없고, 키팅이 끝나 IDLE → LISTEN으로 돌아가야 마이크 감지가 다시 시작된다. wakeword_timeout은 실패 응답이며 노드 종료가 아니다. Controller의 명령 응답 제한 60초도 키팅 시간을 포함하지 않는다.
+다만 현재 is_wakeup/close 예외는 실패 응답으로 감싸지 않으므로 별도 보완 대상이다.
 
 **`command_json` 스키마** (success=true 일 때만 유효):
 
@@ -241,16 +266,24 @@ string error_code
 - `raw_text`는 `command_json`이 아니라 `CommandResult.raw_text`에 담아 DB 기록·디버깅에 사용한다.
 - JSON 파싱 실패나 스키마 위반은 **로봇 쪽에서도 한 번 더 방어한다.** 신뢰 경계이므로 양쪽에서 검증한다.
 
+**현재 구현과 예정 변경:** 현재 음성 노드는 command_json에 raw_text와 task_id도 넣는다.
+이는 위 목표 계약과 다른 과도기 구현이며 해당 필드를 빼는 수정은 음성 노드에서 추후 진행한다.
+그 전까지 Controller는 kit_type/items를 검증하고 추가 메타데이터는 실행 해석에서 무시한다.
+응답 task_id로 Controller가 생성한 task_id를 덮어쓰지 않는다. 이번 수정에서는 음성 코드를 변경하지 않는다.
+
 **`error_code`** (success=false 일 때):
 
 | 코드 | 의미 | 로봇 동작 |
 | --- | --- | --- |
-| `wakeword_timeout` | 웨이크워드 미감지 | 조용히 IDLE 복귀 |
-| `stt_failed` | 음성 인식 실패 | IDLE 복귀, 재시도 안내 |
-| `invalid_command` | 검증기가 거부 (미지원 품목/수량) | IDLE 복귀, 사유 로그 |
-| `openai_quota_exhausted` | 크레딧 소진 | **에러 로그 + 중단.** 재시도해도 안 풀린다 |
-| `openai_rate_limit` | 일시적 제한 | 잠시 후 재시도 가능 |
-| `openai_error` | 기타 API 오류 | IDLE 복귀 |
+| `wakeword_timeout` | 웨이크워드 미감지 응답 | REPORT에서 FAILED 기록 후 IDLE 재대기 |
+| `stt_failed` | 음성 인식 실패 응답 | REPORT에서 FAILED·사유 기록 후 IDLE 재대기 |
+| `invalid_command` | 명령 거부 응답 | REPORT에서 FAILED·사유 기록 후 IDLE 재대기 |
+| `openai_quota_exhausted` | 크레딧 소진 응답 | REPORT에서 FAILED 기록, 자동 재시작 차단 |
+| `openai_rate_limit` | 일시적 제한 응답 | REPORT에서 FAILED 기록, 재요청 간격 후 IDLE 재대기 |
+| `openai_error` | 기타 API 오류 응답 | REPORT에서 FAILED 기록 후 IDLE 재대기 |
+
+명령 요청의 클라이언트 timeout·future 예외·서비스 준비 timeout도 REPORT에서 FAILED로 종료하고 자동 재시작을 차단한다. 이전 음성 처리 종료 여부를 확인할 수 없거나 서비스가 정상 동작하지 않는 상태에서 새 요청을 반복하지 않는다. 운영자가 서버 상태와 원인을 확인한 뒤 재가동한다. 별도 재개 서비스나 긴급 중단 API는 이번 단계에서 추가하지 않는다.
+응답으로 확인된 재대기 가능 실패는 서버 콜백이 종료된 경우다. 물리 동작을 시작하지 않았다면 REPORT에서 불필요한 복귀 동작 없이 결과를 확정할 수 있다. 클라이언트의 명령 구조 검증 실패도 FAILED 기록 후 재대기한다. 재대기 간격은 Controller 파라미터로 두며 openai_rate_limit도 즉시 반복 호출하지 않는다.
 
 이 코드 체계는 레퍼런스 `get_keyword.py` 가 이미 쓰던 것을 그대로 승계한다. 크레딧 소진과 레이트 리밋을 구분하는 게 실전에서 유효했다 — 전자는 기다려도 안 풀린다.
 
@@ -265,6 +298,8 @@ DB 노드는 아래 세 토픽을 구독한다. MongoDB 필드 매핑, 검증 �
 [05 데이터베이스](05-database.md)를 따른다.
 
 ### 4.1 `msg/CommandResult.msg` (음성 → DB)
+
+아래는 목표 발행 계약이다. 현재 get_keyword.py의 서비스 응답은 구현되어 있으나 CommandResult publisher 연결은 후속 작업이다. Controller의 결과 토픽 두 개는 발행 구현이 되어 있다.
 
 ```
 string task_id
@@ -300,6 +335,10 @@ builtin_interfaces/Time stamp
 flatten 후 개수다. `inspection_result`는 `result`, `expected_counts`, `actual_counts`,
 `missing`, `unexpected`, `detection_age`, `inspected_at`을 포함하는 JSON이다.
 
+result는 PASS/FAIL/ERROR, expected_counts는 품목별 객체, actual_counts는 품목별 객체 또는 null, missing/unexpected는 배열이다. inspected_at은 timezone을 포함한 ISO 시각이다.
+검사 오류의 무효 수량은 actual_counts=null로 기록하고 inf/NaN/음수 detection_age는 null로 정규화한다. 검사 미수행 시 inspection_result는 빈 문자열이다. 현재 Component가 없으면
+이름은 빈 문자열, index는 -1이다. IDLE을 제외한 상태 전이마다 RUNNING을, REPORT에서 복귀 결과를 반영한 최종 SUCCESS/FAILED를 한 번 발행한다. 이는 Controller 발행 횟수 규칙이며 전송·DB 저장의 정확히 한 번 보장을 뜻하지 않는다.
+
 ### 4.3 `msg/ComponentResult.msg` (로봇 → DB)
 
 ```
@@ -319,6 +358,12 @@ builtin_interfaces/Time ended_at
 
 토픽은 `/kit/component_result`다. Component가 최종 종료될 때 한 번 발행한다.
 재시도 상세는 `attempts_json` 배열로 보존하며, 최초 저장된 `SUCCESS`만 재고 차감 대상이다.
+
+기존 DB 검증대로 attempt_count는 배열 길이와 같고 attempt_no는 1부터 연속 증가한다.
+SUCCESS의 마지막 Attempt는 SUCCESS여야 하며 SKIPPED의 Attempt 배열은 비어 있어야 한다.
+TASK_FATAL로 미시작한 Component는 SKIPPED로 발행하며 시작·종료 시각은 건너뛰기로 확정한
+시각을 사용한다. index는 0부터 시작한다. Task 검사 PASS만으로 FAILED Component 상태나
+기존 재고 차감 결과를 소급 수정하지 않는다.
 
 ### 4.4 로봇 노드는 DB를 직접 건드리지 않는다
 
@@ -345,7 +390,7 @@ ros2 topic hz   /detection/objects
 # 좌표 서비스 왕복 시험 (Day 2)
 ros2 service call /get_component_pose kit_interfaces/srv/GetComponentPose \
   "{component: 'cup_ramen', robot_posx: [400,0,400,0,180,0], max_age_sec: 1.0}"
-ros2 service call /get_command kit_interfaces/srv/GetCommand "{}"
+ros2 service call /get_command kit_interfaces/srv/GetCommand "{task_id: 'TASK-20260905T053012123456Z'}"
 
 # 상태 발행 확인
 ros2 topic echo /kit/task_status
