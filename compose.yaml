@@ -57,12 +57,25 @@ services:
     build:
       context: .
       dockerfile: src/kit_vision/Dockerfile
-    restart: "no"
+    command: ["ros2", "run", "kit_vision", "object_detection"]
+    restart: unless-stopped   # 운영 핵심 노드 — 호스트 리부팅/크래시에도 자동 복구
     network_mode: host   # 호스트에서 도는 realsense2_camera 토픽을 그대로 구독
+    environment:
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-20}   # 호스트 realsense2_camera와 같은 도메인이어야 토픽이 보인다
+
+  vision-debug:
+    profiles: ["debug"]   # `docker compose up -d`(전체 기동) 기본값에서 제외 — xhost 없이 뜨면 크래시
+    build:
+      context: .
+      dockerfile: src/kit_vision/Dockerfile
+    command: ["ros2", "run", "kit_vision", "debug_view"]
+    depends_on: [vision]
+    restart: "no"   # X11/xhost에 의존하는 디버그 툴 — 자동 재시작하면 크래시루프
+    network_mode: host
     environment:
       - DISPLAY=${DISPLAY}       # debug_view 팝업창용. 호스트에서 `xhost +local:docker` 먼저 실행
       - QT_X11_NO_MITSHM=1
-      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-20}   # 호스트 realsense2_camera와 같은 도메인이어야 토픽이 보인다
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-20}
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
 
