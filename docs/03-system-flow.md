@@ -6,6 +6,9 @@
 
 ## 1. 전체 시퀀스
 
+실제 장비 연결 시의 흐름이다. 현재 Controller는 MotionDemo를 사용한다.
+음성 노드의 CommandResult 발행은 목표 계약이며 get_keyword.py에서는 아직 연결하지 않았다.
+
 ```mermaid
 sequenceDiagram
     actor U as 사용자
@@ -23,7 +26,7 @@ sequenceDiagram
 
     C->>V: /get_command (task_id)
     U->>V: "Hello Rokey" + 음성 명령
-    V->>DB: /kit/command_result (CommandResult)
+    Note over V,DB: /kit/command_result 발행은 음성 노드 후속 연결
     V-->>C: command_json {kit_type, items[]}
     C->>C: 검증 → Component 리스트로 flatten
     C->>DB: /kit/task_status (RUNNING, VALIDATE)
@@ -67,9 +70,9 @@ sequenceDiagram
 - TASK_FATAL 또는 최종 안전 복귀 실패가 있으면 FAILED다.
 - EMERGENCY, 일시 정지, 실행 중 강제 중단은 이번 구현 범위에서 제외한다.
 
-아래는 Controller 구현 계획이다. 기존 서비스 서버와 DB 구현은 유지한다.
-Motion API 이름·반환 조건·내부 실행 방식의 합의는 이번 수정 범위에서 제외하며,
-5절은 기존 제안으로 보존한다. 새 Controller 호출 계약으로 확정한 것은 아니다.
+Controller의 7단계 처리기, 서비스 future, 재시도, 결과 발행과 REPORT가 구현되어 있다.
+현재 main은 `Controller(motion=MotionDemo())`를 생성한다. 실제 Motion 구현·로봇 검증은 후속 작업이며 Controller가 사용하는 호출 계약은 5절을 따른다.
+실행·파라미터·검증 범위는 [06 Controller 실행 가이드](06-controller-guide.md)에 정리한다.
 
 ```mermaid
 stateDiagram-v2
@@ -108,26 +111,25 @@ stateDiagram-v2
 - 서비스 준비 대기와 응답 대기는 별도 deadline으로 관리한다. future 예외와 응답 내용도 검사한다.
 - timeout 이후 늦은 결과를 현재 작업에 반영하지 않는다. future 취소는 서버 실행 취소를 보장하지 않는다.
 - task_id는 단일 Controller 운영을 전제로 UTC 마이크로초 형식 `TASK-20260905T053012123456Z`로 IDLE 진입 시 한 번 생성한다.
-- 짧은 timer 주기는 Motion 호출의 비동기 실행을 의미하지 않는다. 실제 연결 시 executor 응답 처리와 호출 정체 여부를 확인한다. Motion 계약은 별도 합의 대상이다.
+- 짧은 timer 주기는 Motion 호출의 비동기 실행을 의미하지 않는다. 실제 연결 시 executor 응답 처리와 호출 정체 여부를 확인한다. 호출 계약은 5절을 따르며 DSR 초기화와 executor 연결은 실제 Motion 구현 시 검증한다.
 
 ### 2.2 설정 소유권
 
 | 정보 | 소유·사용 경계 |
 | --- | --- |
-| 지원 품목 | 기존 `kit_vision/resource/class_names.json` 기준 |
-| 품목별 사용 가능 슬롯 이름 | 설정 로더가 model에 전달할 메타데이터. VALIDATE에서 예약 |
+| 지원 품목 | controller.yaml의 supported_names. 현재 class_names.json과 수동으로 일치시켜 관리 |
+| 공용 슬롯 이름 | controller.yaml의 slot_names 순서로 품목 구분 없이 할당. 현재 slot_1~slot_6 |
 | 슬롯 좌표·접근 높이·이동 설정 | Motion 영역. Controller는 해석하지 않음 |
 | 파지 폭·힘 등 | Motion 영역 |
 | grasp_params.json의 z_offset | 기존 position_estimation이 target_pose에 반영하는 책임 유지. Controller에서 중복 보정하지 않음 |
 | timer·서비스 대기·정착·시도 제한 | Controller 파라미터 |
 
-`place_slots.json`, `motion.yaml`과 슬롯 메타데이터 로더는 구현 예정이다.
-파일 구조와 배포 등록은 해당 구현 단계에서 추가하며 기존 grasp 설정 형식은 변경하지 않는다.
+`resource/controller.yaml`은 기존 setup.py의 resource 설치 규칙으로 배포한다.
+Controller는 ROS 파라미터에서 품목과 슬롯 이름을 받으며 좌표 파일은 읽지 않는다.
+실제 슬롯 좌표와 모션 설정 로드는 후속 Motion 구현 범위다. 기존 grasp 설정 형식은 유지한다.
 
-서비스 준비 timeout, 명령·좌표·검사 응답 timeout은 각각 독립 파라미터로 둔다.
-기존 문서의 명령 timeout 60초는 전체 처리 상한이 검증된 값이 아니다. 현재 음성 노드는
-웨이크워드에 최대 30초를 사용하고 이후 STT·LLM을 수행한다. 수치는 실제 지연과 담당자 확인을
-거쳐 정하며 무한 대기를 기본값으로 두지 않는다.
+서비스 준비 제한은 세 client가 공통 파라미터를 쓰되 상태별로 deadline을 새로 만든다.
+각 서비스의 응답 제한은 독립 파라미터다. 명령 60초는 요청부터 음성·STT·LLM 응답까지이며 키팅 소요 시간을 포함하지 않는다. 실제 지연에 따라 조정할 값이며 설정값은 06 문서에 정리한다.
 
 초기 비전 설정은 max_age_sec=1.0, 관찰·검사 정착 1.2초, exclude_taken=[]다.
 동일 시간 기준과 이동 완료 시점의 정확성을 전제로 실기에서 검증한다. 검사 화면은 완성
@@ -146,7 +148,9 @@ flatten, 슬롯 예약, expected_counts 생성을 담당한다.
 - 품목명은 지원 클래스여야 하며 qty는 bool을 제외한 1 이상 정수다. 문자열·실수를 자동 변환하지 않는다.
 - 중복 품목 행은 합산하고 최초 등장 순서로 실행한다. 수량 하나당 Component 하나를 만든다.
 - Component index는 0부터 시작한다. 슬롯은 VALIDATE에서 모두 예약하며 부족하면 이동 전에 FAILED 처리한다.
+- 품목 전용 구분 없이 설정된 공용 슬롯을 순서대로 사용한다. 슬롯 이름 중복·빈 이름과 총수량 초과는 거부한다.
 - 실패한 Component의 슬롯도 다른 Component에 재할당하지 않는다.
+- 한 섹터에 물체 하나를 놓는 전제다. 다음 작업의 트레이 교체·빈 상태 확인은 아직 구현하지 않았다.
 - expected_counts는 원래 검증된 명령의 총수량이며 실행 결과에 따라 줄이지 않는다.
 
 | 모델 | 최소 데이터 |
@@ -165,11 +169,11 @@ Component 상태는 내부 PENDING, 최종 SUCCESS·FAILED·SKIPPED다. Attempt 
 
 1. OBSERVE에서 Attempt를 시작하고 관찰·정착 후 좌표를 비동기 요청한다.
 2. 응답 성공 시 target_pose의 6개 값이 유한한 수인지 검사하고 EXECUTE로 전환한다.
-3. EXECUTE의 execute_component()는 저장된 좌표로 pick/place 한 번만 수행한다.
+3. EXECUTE의 handle_execute()는 저장된 좌표로 pick/place 한 번만 수행한다.
 4. 재시도 오류는 Attempt에 기록하고 이전 target_pose를 폐기한 뒤 OBSERVE로 돌아간다.
 5. Component 결과가 확정되면 한 번 발행한다. 다음 Component가 없으면 INSPECT로 전환한다.
 
-재시도 반복문이나 좌표 서비스 대기를 execute_component() 안에 넣지 않는다.
+재시도 반복문이나 좌표 서비스 대기를 handle_execute() 안에 넣지 않는다.
 stale·not_detected는 재관찰하고, grasp_failed는 필요한 안전 복구 후 재관찰한다.
 시도 소진 시 Component 오류는 max_attempts로 기록하되 마지막 Attempt의 실제 원인은 보존한다.
 
@@ -189,7 +193,9 @@ stale·not_detected는 재관찰하고, grasp_failed는 필요한 안전 복구 
 DB 재고 차감은 기존대로 최초 SUCCESS Component 기준이다. Task 검사 PASS가 FAILED
 Component의 재고를 소급 차감하지 않는다. 기존 DB 집계·재고 정책은 변경하지 않는다.
 
-### 3.4 1단계 계약 검증 시나리오
+### 3.4 실행 검증 시나리오
+
+아래는 검증할 기대 동작이며 모든 실패 경로의 테스트 완료를 의미하지 않는다.
 
 | 시나리오 | 기대 결과 |
 | --- | --- |
@@ -336,74 +342,42 @@ if __name__ == "__main__":
 
 ---
 
-## 5. motion.py — controller 가 쓰는 라이브러리
+## 5. Controller가 사용하는 Motion 객체
 
-### 5.1 공개 API
+### 5.1 호출 계약
 
-```python
-init(node_id="dsr01", model="m0609")   # DR_init 설정 + DSR_ROBOT2 바인딩. 최초 1회 필수
-home()                                 # 관찰 자세 복귀 + 그리퍼 개방
-current_posx() -> list[6]              # controller 가 request 의 robot_posx 를 채울 때
-pick(target_pose, params) -> bool      # 접근 → 하강 → 파지 → 파지확인 → 상승
-place(slot, params)                    # 슬롯 위 → 하강 → 개방 → 상승
-```
+Controller는 외부에서 주입된 객체만 사용한다. Motion은 다음 메서드에 맞춰 구현한다.
 
-controller 는 이 다섯 개만 쓴다. `movej`/`movel`/`mwait` 를 직접 부르지 않는다 — 그러면 controller 가 `DSR_ROBOT2` 를 import 하게 되고, `init()` 으로 순서를 강제한 의미가 사라진다.
+| 메서드 | 반환·역할 |
+| --- | --- |
+| `move_home() -> None` | 대기 자세 이동과 그리퍼 개방 완료 |
+| `move_to_observation_pose() -> None` | 관찰 자세 이동 완료 |
+| `move_to_inspection_pose() -> None` | 검사 자세 이동 완료 |
+| `get_current_pose() -> list[float]` | 베이스 TCP 자세 6개, mm·deg·ZYZ |
+| `pick_component(component_name, target_pose) -> bool` | 파지 확인 성공 True, 재시도 가능한 파지 실패 False |
+| `place_component(component_name, slot_name) -> None` | 슬롯 이름으로 좌표 조회 후 배치 완료 |
+| `recover_to_safe_pose() -> None` | 그리퍼 개방과 안전 자세 복귀 완료 |
 
-**`init()` 을 반드시 먼저 호출한다.** 레퍼런스는 모듈 최상단에서 DR_init 을 설정해서 import 순서에 의존했고, 그래서 라이브러리로 쓸 수 없었다. 근거는 [01 아키텍처 4.3절](01-architecture.md).
+동작 메서드는 완료 후 반환하며 수행 불가 시 예외를 발생시킨다. Controller는
+DSR·RG2를 직접 호출하거나 슬롯 좌표·파지 파라미터를 해석하지 않는다.
+기존 position_estimation이 적용하는 z_offset을 다시 적용하지 않는다.
 
-### 5.2 component 별 모션 차이는 파라미터로 흡수한다
+### 5.2 현재 데모와 실제 Motion의 경계
 
-품목마다 별도 전략 함수를 만들지 않는다. 9종이 전부 수직 하향 파지로 가능하다는 전제이고, 차이는 `grasp_params.json` 의 폭·힘·`z_offset`·`approach` 로 흡수된다.
+motion_demo.py의 MotionDemo는 호출 로그만 출력하고 이동은 즉시 완료, 파지는 항상
+성공으로 처리한다. TCP 자세는 가상 0 값 6개다. 실제 이동·파지 확인·좌표 정확성은 검증하지 않는다.
+실제 모션 구현을 연결하려면 main의 주입 객체를 교체한다. 현재 실행 중 전환용 파라미터는 없다.
 
-```json
-{"strategy": "top_down", "width": 800, "force": 150, "z_offset": -25.0, "approach": 120.0}
-```
+실제 Motion은 로봇 초기화, 슬롯 좌표와 파지 설정 로드, 접근·파지·배치·복구를 담당한다.
+이전 문서의 init/home/pick/place 모듈 함수 예시는 현재 Controller 호출 방식이 아니다.
+DSR 초기화 순서와 동기 호출 중 응답을 처리할 executor 구성은 Motion 통합 시 확인한다.
 
-`strategy` 필드는 두되 `"top_down"` 하나만 구현하고, 다른 값이 오면 명시적으로 에러를 낸다. **확장점만 표시하고 코드는 쓰지 않는다.** Day 8 품목별 파지 시험에서 수직 하향으로 안 되는 품목이 실제로 나오면 그때 전략을 추가한다.
+### 5.3 REPORT의 복귀 처리
 
-### 5.3 파지 시퀀스
-
-레퍼런스 `pick_and_place_target` 을 슬롯 개념으로 확장한다.
-
-```python
-def pick(pose, params):
-    p = params
-    approach = pose[:2] + [pose[2] + p["approach"]] + pose[3:]
-
-    movel(approach, vel=VEL, acc=ACC); mwait()   # 1. 물체 위로 접근
-    movel(pose,     vel=VEL, acc=ACC); mwait()   # 2. 하강
-    gripper.close_gripper(width=p["width"], force=p["force"])
-    wait_gripper()                               # 3. 폐쇄 완료 대기
-    if not grasped():                            # 4. 파지 확인
-        return False
-    movel(approach, vel=VEL, acc=ACC); mwait()   # 5. 상승
-    return True
-```
-
-**접근 자세를 거치는 이유:** 목표 좌표로 `movel` 을 바로 쏘면 팔이 대각선으로 내려오면서 옆 물건을 쓸고 지나간다. 트레이에 물건이 붙어 있으면 반드시 위에서 수직으로 내려와야 한다. 레퍼런스는 파지 후 상승(`PLACE_LIFT`)만 있고 접근 상승이 없었는데, 공구 하나만 놓인 환경이라 문제가 안 됐던 것이다. 9종이 트레이에 늘어선 우리 환경에서는 필수다.
-
-**`grasped()` 판정:** RG2 는 폭을 읽을 수 있다. 폐쇄 후 폭이 거의 0 이면 헛집은 것이다.
-
-```python
-def grasped():
-    return gripper.get_width() > EMPTY_WIDTH_THRESHOLD   # 실측 후 결정
-```
-
-이게 없으면 빈 그리퍼로 슬롯까지 가서 놓는 시늉을 하고, `INSPECT` 단계에 가서야 실패를 안다. 조기에 잡아야 재시도할 수 있다.
-
-**배치:**
-
-```python
-def place(slot_name, params):
-    slot = PLACE_SLOTS[slot_name]                         # resource/place_slots.json
-    movel(above(slot), vel=VEL, acc=ACC); mwait()
-    movel(slot,        vel=VEL, acc=ACC); mwait()
-    gripper.open_gripper(); wait_gripper()
-    movel(above(slot), vel=VEL, acc=ACC); mwait()         # 놓고 빠져나온다
-```
-
-레퍼런스는 배치 후 상승이 없어서, 다음 `movej` 가 트레이를 스치는 경로를 탈 수 있었다. 놓고 나면 반드시 수직으로 빠져나온다.
+물리 동작 전 명령 실패는 복귀를 생략한다. 동작을 시작했다면 TASK_FATAL일 때 안전 복구,
+그 외에는 move_home을 호출한다. 복귀 실패는 최종 Task FAILED이며 자동 재시작을 차단한다.
+이미 recovery_failed로 종료한 경우에는 REPORT에서 같은 복구를 자동 반복하지 않는다.
+검사 PASS라도 복귀 실패 시 Task는 FAILED이며 검사 PASS 기록 자체는 유지한다.
 
 ---
 
@@ -425,7 +399,12 @@ future 예외·준비 timeout은 자동 재시작을 차단한다. 서버의 이
 | 검사 ERROR | 검사 통신 실패, 검출 없음·노후, 응답 오류 | TASK_FATAL, 검사 ERROR 기록 후 REPORT |
 | EMERGENCY | 로봇 통신 두절·충돌·긴급 정지에 대한 별도 중단 프로토콜 | 이번 범위 밖. 실제 중단·감지 기능이 구현되었다고 가정하지 않음 |
 
-분류하지 못한 실행 예외는 TASK_FATAL로 처리한다. Motion 상세 오류 분류는 별도 계약에서 확정한다.
+Motion 호출과 서비스 응답 처리에서 잡은 예외는 TASK_FATAL로 처리한다.
+timer 전체를 감싸는 공통 예외 처리는 없으므로 메시지 직렬화·발행 등 모든 예외가
+자동 복구된다고 가정하지 않는다. 실제 장비 오류의 세부 분류는 Motion 통합 시 확인한다.
+TASK_FATAL과 자동 재시작 차단은 별개다. 현재 좌표·검사·배치 오류는 최종 복귀가 성공하면
+설정된 간격 후 새 명령을 받을 수 있다. 명령 통신 오류·크레딧 소진·미지 명령 오류와
+안전 복구 실패는 재시작을 차단한다.
 Component 실패만으로 검사 missing을 만들어 넣지 않는다. missing/unexpected는 실제 검사 응답에서 기록한다.
 out_of_workspace는 원인을 단정하지 않고 좌표 사용을 거부한 뒤 Component를 실패 처리한다.
 
