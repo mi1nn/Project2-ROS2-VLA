@@ -1,4 +1,5 @@
 # controller_model.py
+# 명령 검증, flatten, 실행 데이터 모델 관리
 from dataclasses import dataclass, field
 from datetime import datetime
 
