@@ -10,10 +10,9 @@
   <depend>rclpy</depend>
   <depend>kit_interfaces</depend>
   <depend>python3-psycopg2</depend>
+  <depend>python3-pymongo</depend>
 
   <test_depend>ament_copyright</test_depend>
-  <test_depend>ament_flake8</test_depend>
-  <test_depend>ament_pep257</test_depend>
   <test_depend>python3-pytest</test_depend>
 
   <export>

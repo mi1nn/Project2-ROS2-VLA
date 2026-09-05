@@ -53,12 +53,12 @@ def _build_prompt_template(class_names):
 
         <출력 형식>
         - 아래 JSON 하나만 출력하세요. 다른 텍스트는 절대 출력하지 마세요.
-        - {{"kit_type": "<키트 종류, 예: earthquake>", "items": [{{"name": "<품목 리스트 중 하나>", "qty": <1 이상 정수>}}]}}
+        - {{{{"kit_type": "<키트 종류, 예: earthquake>", "items": [{{{{"name": "<품목 리스트 중 하나>", "qty": <1 이상 정수>}}}}]}}}}
         - 품목 리스트에 없는 물건은 절대 포함하지 마세요.
 
         <예시>
         - 입력: "지진 키트로 컵라면 두 개랑 마스크 하나 담아줘"
-          출력: {{"kit_type": "earthquake", "items": [{{"name": "cup_ramen", "qty": 2}}, {{"name": "mask", "qty": 1}}]}}
+        출력: {{{{"kit_type": "earthquake", "items": [{{{{"name": "cup_ramen", "qty": 2}}}}, {{{{"name": "mask", "qty": 1}}}}]}}}}
 
         <사용자 입력>
         "{{user_input}}"

@@ -12,13 +12,14 @@ src/
   kit_vision/       # ament_python — YOLO Segmentation 추론 + RealSense + 카메라 좌표 발행
   kit_voice/        # ament_python — STT + LLM + 명령 검증기
   kit_robot/        # ament_python — controller(상태머신) + position_estimation + M0609/RG2 모션
+  kit_db/           # ament_python — MongoDB 실행 추적 + PostgreSQL 품목·재고 관리
 ```
 
-빌드는 의존 순서상 `kit_interfaces` → 나머지 3개 순이다.
+빌드는 의존 순서상 `kit_interfaces` → 나머지 4개 순이다.
 
 ```bash
 colcon build --symlink-install --packages-select kit_interfaces
-colcon build --symlink-install --packages-select kit_vision kit_voice kit_robot
+colcon build --symlink-install --packages-select kit_vision kit_voice kit_robot kit_db
 source install/setup.bash
 ```
 
@@ -79,32 +80,32 @@ source install/setup.bash
 | `kit_voice` | `command_node` | 웨이크워드 → STT → LLM → JSON 검증. `/get_command` **서비스 서버** | 팀원 |
 | `kit_robot` | `position_estimation` | 검출 토픽 구독 → hand-eye 변환 → **파지 자세 서비스 응답** | 나 |
 | `kit_robot` | `controller` | component 단위 실행, 상태머신, `motion.py` 사용 | 나 |
-| (신규, 이름 미정) | DB 노드 | MongoDB/PostgreSQL 적재. 토픽 3개(commands / kit_executions / component_executions) 구독 | 팀원 전담 |
+| `kit_db` | `db_node` | `/kit/command_result`, `/kit/task_status`, `/kit/component_result` 구독. MongoDB 실행 추적 및 PostgreSQL 재고 관리 | 팀원 전담 |
 
 담당 경계 요약: **오케스트레이션 · 로봇 제어 · 좌표 추정 · 인터페이스 계약 · 비전 노드 ROS2 래퍼가 내 몫이고, YOLO 모델 학습 · 음성/LLM · DB 적재는 팀원 몫이다.**
 
 ```
-                    /camera/color/image_raw
- RealSense D435 ──▶ /camera/aligned_depth_to_color/image_raw ──▶ object_detection
-                    /camera/color/camera_info                          │
-                                                                       │ 토픽 (상시 발행)
-                                        /detection/objects  ← 카메라 좌표│
-                                                                       ▼
- [사용자 음성] ──▶ command_node                              position_estimation
-                        │      │                                       ▲
-                        │      └── 토픽 (신규, 팀원) ──▶ DB 노드          │ srv /get_component_pose
-                        │           raw_text + command_json             │  req: component, robot_posx, max_age_sec
-                        │ srv /get_command                              │  res: target_pose + 원본 검출 정보
-                        ▼                                               │
-                    controller ───────────────────────────────────────┘
+                      /camera/color/image_raw
+ RealSense D435 ────▶ /camera/aligned_depth_to_color/image_raw ────▶ object_detection
+                      /camera/color/camera_info                            │
+                                                                           │ 토픽 (상시 발행)
+                                           /detection/objects  ← 카메라 좌표 │
+                                                                           ▼
+ [사용자 음성] ──▶ command_node                                    position_estimation
+                        │  │                                             ▲
+                        │  └── /kit/command_result ──▶ db_node           │ srv /get_component_pose
+                        │           CommandResult                        │  req: component, robot_posx, max_age_sec
+                        │ srv /get_command                               │  res: target_pose + 원본 검출 정보
+                        ▼                                                │
+                    controller ──────────────────────────────────────────┘
                         │
                         ├── import ──▶ motion.py ──▶ M0609 (DSR_ROBOT2) / RG2 (modbus)
                         │
-                        ├── 토픽 (kit_type 단위, 신규) ──▶ DB 노드 (팀원)
-                        └── 토픽 (component 단위, 신규) ──▶ DB 노드 (팀원)
+                        ├── /kit/task_status ────────────▶ db_node (TaskStatus)
+                        └── /kit/component_result ───────▶ db_node (ComponentResult)
 ```
 
-> **DB 적재 구조는 [05 DB 전체 구조](05-db-전체-구조.md) 참고, 설계·구현은 DB 담당 팀원 몫.** MongoDB 3개 컬렉션(`commands`/`kit_executions`/`component_executions`)에 각각 토픽으로 연결한다 — `command_node`→DB 토픽 1개(신규), `controller`→DB 토픽 2개(신규, kit 단위/component 단위로 분리). 기존 문서의 `/kit/task_status` 단일 토픽 서술은 이 3-토픽 구조로 대체될 예정이니, 실제 토픽 이름·msg 스키마가 확정되면 이 문서와 [02 인터페이스](02-interfaces.md)를 함께 갱신한다.
+> **DB 적재 구조와 저장 정책은 [05 데이터베이스](05-database.md)를 기준으로 삼는다.** `command_node`가 발행한 `CommandResult`는 `commands`, `controller`가 발행한 `TaskStatus`와 `ComponentResult`는 각각 `kit_executions`와 `component_executions`에 저장된다. 최초 저장된 `SUCCESS` Component만 PostgreSQL 재고를 1개 차감한다.
 
 **검출은 서비스가 아니라 토픽이다.** `object_detection` 은 요청과 무관하게 계속 돌면서 검출을 발행한다. 덕분에 `ros2 topic echo /detection/objects` 로 인식 상태를 언제든 볼 수 있고, 로봇을 세워둔 채 비전만 디버깅할 수 있다. 반면 좌표는 **요청 시점에 확정되어야** 하므로 서비스다 — 이 하이브리드가 이 시스템의 통신 구조다.
 
@@ -169,7 +170,7 @@ def _require():
 
 ```
 kit_robot/kit_robot/
-  controller.py            # 노드. component 실행 루프, 상태머신, /kit/task_status 발행
+  controller.py            # 노드. component 실행 루프, 상태머신, /kit/task_status·/kit/component_result 발행
   position_estimation.py   # 노드. 검출 구독 + hand-eye 변환 + 서비스 서버
   motion.py                # 모듈. init / home / pick / place — controller 가 import
   onrobot.py               # 모듈. RG2 modbus 제어 (레퍼런스 그대로 이식)
@@ -179,6 +180,14 @@ kit_vision/kit_vision/
   object_detection.py      # 노드. YOLO seg + depth + 역투영 → 토픽 발행
   realsense.py             # 모듈. ImgNode (레퍼런스 그대로 이식)
   yolo_model.py            # 모듈. seg 추론 + 다중 프레임 집계
+
+kit_db/kit_db/
+  db_node.py               # 노드. 세 결과 토픽 구독 + mapper 검증 + 저장소 호출
+  config.py                # 모듈. 환경 변수에서 데이터베이스 연결 설정을 로드
+  message_mapper.py        # 모듈. ROS 메시지를 MongoDB에 저장 가능한 Python dictionary로 변환.
+  mongodb.py               # DB 노드에서 사용되는 MongoDB 접속을 관리
+  persistence.py           # message_mapper를 통해 ROS 메시지를 변환하는 기능을 제공하는 모듈
+  postgres.py              # PostgreSQL DB와 상호작용하는 모듈
 ```
 
 `motion.py`, `grasp.py`, `position_estimation.py` 의 변환 로직은 로봇 없이 단위 검증이 가능하다. 좌표 변환에는 self-check 를 붙인다([03 플로우](03-system-flow.md) 4.3절).
