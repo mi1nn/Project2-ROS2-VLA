@@ -21,27 +21,28 @@ sequenceDiagram
         D->>P: /detection/objects (header.stamp + 카메라 좌표)
     end
 
-    C->>V: /get_command
+    C->>V: /get_command (task_id)
     U->>V: "Hello Rokey" + 음성 명령
     V->>DB: /kit/command_result (CommandResult)
     V-->>C: command_json {kit_type, items[]}
     C->>C: 검증 → Component 리스트로 flatten
     C->>DB: /kit/task_status (RUNNING, VALIDATE)
 
-    C->>R: motion.home() — 관찰 자세 + 정착 대기
-
-    loop Component 하나씩
+    loop Component 하나씩 (재시도도 OBSERVE부터)
+        C->>R: 관찰 자세 이동
+        C->>C: timer로 정착 대기, robot_posx 확보
         C->>P: /get_component_pose (component, robot_posx, max_age_sec)
         P->>P: 최신성 검사 → hand-eye 변환<br/>z_offset → 작업영역 검사 → 후보 선정
-        P-->>C: target_pose + source + detection_age
+        P-->>C: target_pose + source
         C->>DB: /kit/task_status (RUNNING, EXECUTE, i/n)
-        C->>R: motion.pick() → motion.place()
+        C->>R: Motion을 통한 파지 → 배치
         C->>DB: /kit/component_result (SUCCESS/FAILED/SKIPPED)
     end
 
     C->>R: 검사 자세 이동 + 정착 대기
     C->>P: /inspect_kit (기대 품목/수량)
     P-->>C: ok, missing[], unexpected[], actual_counts[]
+    C->>R: 최종 복귀 또는 오류 복구
     C->>DB: /kit/task_status (SUCCESS 또는 FAILED, inspection_result)
 ```
 
@@ -55,101 +56,151 @@ sequenceDiagram
 
 ## 2. 상태머신
 
+### 2.0. 확정된 원칙
+
+- Controller는 Enum + timer + 비동기 service future로 구성한다.
+- Motion 객체는 외부에서 주입받는다.
+- EXECUTE 한 번은 현재 Component의 pick/place 한 번만 처리한다.
+- 재시도와 다음 Component 실행은 OBSERVE에서 시작한다.
+- expected_counts는 검증된 원래 명령에서 생성하며 실행 중 변경하지 않는다.
+- 최종 성공은 실물 검사 PASS를 기준으로 한다.
+- TASK_FATAL 또는 최종 안전 복귀 실패가 있으면 FAILED다.
+- EMERGENCY, 일시 정지, 실행 중 강제 중단은 이번 구현 범위에서 제외한다.
+
+아래는 Controller 구현 계획이다. 기존 서비스 서버와 DB 구현은 유지한다.
+Motion API 이름·반환 조건·내부 실행 방식의 합의는 이번 수정 범위에서 제외하며,
+5절은 기존 제안으로 보존한다. 새 Controller 호출 계약으로 확정한 것은 아니다.
+
 ```mermaid
 stateDiagram-v2
     [*] --> IDLE
-    IDLE --> LISTEN: 시작
-    LISTEN --> VALIDATE: command_json 수신
-    LISTEN --> IDLE: 타임아웃 / 에러코드
-    VALIDATE --> OBSERVE: 스키마·품목 검증 통과
-    VALIDATE --> IDLE: 검증 실패
-    OBSERVE --> EXECUTE: 관찰 자세 도달 + 정착
-    EXECUTE --> EXECUTE: 다음 Component
-    EXECUTE --> INSPECT: 전 Component 처리
-    INSPECT --> REPORT
-    REPORT --> IDLE
+    IDLE --> LISTEN: 작업 초기화
+    LISTEN --> VALIDATE: 명령 수신 성공
+    LISTEN --> REPORT: 명령 실패 또는 통신 오류
+    VALIDATE --> OBSERVE: 검증 및 슬롯 예약 완료
+    VALIDATE --> REPORT: 검증 실패
+    OBSERVE --> EXECUTE: 유효한 좌표 응답
+    OBSERVE --> OBSERVE: 재시도 또는 다음 Component
+    OBSERVE --> INSPECT: 마지막 Component 실패 확정
+    OBSERVE --> REPORT: TASK_FATAL
+    EXECUTE --> OBSERVE: 재시도 또는 다음 Component
+    EXECUTE --> INSPECT: 전체 Component 처리 완료
+    EXECUTE --> REPORT: TASK_FATAL
+    INSPECT --> REPORT: 검사 완료 또는 오류
+    REPORT --> IDLE: 복귀 성공 및 재시작 허용
 ```
 
-상위 상태머신은 이게 전부다. **파지·배치·재시도는 전부 `EXECUTE` 안의 `execute_component()` 로 내려간다.**
+| 상태 | 진입 시 한 번 수행 | 이후 tick에서 확인 | 종료·전이 |
+| --- | --- | --- | --- |
+| IDLE | 변수 초기화, task_id 생성 | 없음 | LISTEN |
+| LISTEN | 서비스 준비 대기 시작 | 준비되면 한 번 요청, future·deadline 확인 | 성공 → VALIDATE / 실패 → REPORT |
+| VALIDATE | 검증, flatten, 전체 슬롯 예약, expected_counts 생성 | 없음 | 성공 → OBSERVE / 실패 → REPORT |
+| OBSERVE | Attempt 시작, 관찰 자세 이동 | 정착 후 자세 확보·좌표 요청 한 번, future 확인 | 성공 → EXECUTE / 실패 → 오류 정책 적용 |
+| EXECUTE | 현재 Component의 pick/place 한 번 | 없음 | 다음 Component → OBSERVE / 전체 완료 → INSPECT |
+| INSPECT | 검사 자세 이동 | 정착 후 검사 요청 한 번, future 확인 | REPORT |
+| REPORT | 미완료 결과 정리, 필요한 복귀·복구, 최종 결과 한 번 발행 | 자동 재시작 차단 시 유지 | 복귀 성공 및 재시작 허용 → IDLE |
 
-`PICK`/`PLACE`/`RETRY` 를 최상위 상태로 두지 않는 이유: 그러면 "지금 몇 번째 품목의 몇 번째 재시도인지" 를 최상위 상태머신이 들고 있어야 하고, 상태 개수가 품목 수와 재시도 횟수의 곱으로 불어난다. 한 단계 내리면 상위는 7개 상태로 고정되고, 반복은 평범한 `for` 루프가 된다.
+### 2.1 timer와 future 관리
 
-| 상태 | 진입 조건 | 수행 | 정상 전이 | 실패 처리 |
-| --- | --- | --- | --- | --- |
-| `IDLE` | 시작 / 작업 종료 | `motion.home()` — 관찰 자세, 그리퍼 개방 | `LISTEN` | — |
-| `LISTEN` | 사용자 시작 | `/get_command` 호출 (타임아웃 60초) | `VALIDATE` | 에러코드별 처리 → `IDLE` |
-| `VALIDATE` | 명령 수신 | JSON 파싱, 품목·수량 재검증, **Component 리스트로 flatten** | `OBSERVE` | 로그 후 `IDLE` |
-| `OBSERVE` | 검증 통과 | 관찰 자세 이동 + **정착 대기**, `robot_posx` 캡처 | `EXECUTE` | 이동 실패 시 `REPORT` |
-| `EXECUTE` | 관찰 자세 도달 | Component 를 하나씩 `execute_component()` | 전부 처리 시 `INSPECT` | Component 개별 실패는 흡수 |
-| `INSPECT` | 전 Component 처리 | 검사 자세 이동 + 정착, `/inspect_kit` | `REPORT` | 검사 실패도 `REPORT` (결과에 기록) |
-| `REPORT` | 검사 완료 | 최종 `TaskStatus` 발행 (`SUCCESS`/`FAILED`) | `IDLE` | — |
+- 상태 진입 작업과 매 tick 확인 작업을 구분한다. 이동·서비스 요청·최종 발행을 반복하지 않는다.
+- 정착은 준비 시각 비교로 처리한다. Controller에서 sleep이나 future 완료까지의 대기 루프를 사용하지 않는다.
+- 서비스 요청은 동시에 하나만 진행한다. 요청한 tick은 반환하고 이후 tick에서 완료 여부를 확인한다.
+- 서비스 준비 대기와 응답 대기는 별도 deadline으로 관리한다. future 예외와 응답 내용도 검사한다.
+- timeout 이후 늦은 결과를 현재 작업에 반영하지 않는다. future 취소는 서버 실행 취소를 보장하지 않는다.
+- task_id는 단일 Controller 운영을 전제로 UTC 마이크로초 형식 `TASK-20260905T053012123456Z`로 IDLE 진입 시 한 번 생성한다.
+- 짧은 timer 주기는 Motion 호출의 비동기 실행을 의미하지 않는다. 실제 연결 시 executor 응답 처리와 호출 정체 여부를 확인한다. Motion 계약은 별도 합의 대상이다.
 
-**정착 대기(settle)가 상태로 드러나는 이유:** eye-in-hand 라서 팔이 멈춘 뒤에 찍힌 프레임이어야 좌표가 맞는다. `mwait()` 만으로는 부족하고, 검출 파이프라인이 새 프레임을 한 바퀴 도는 시간이 더 필요하다. 이걸 코드 어딘가의 `sleep` 으로 묻지 않고 상태 진입 조건으로 명시한다.
+### 2.2 설정 소유권
 
----
+| 정보 | 소유·사용 경계 |
+| --- | --- |
+| 지원 품목 | 기존 `kit_vision/resource/class_names.json` 기준 |
+| 품목별 사용 가능 슬롯 이름 | 설정 로더가 model에 전달할 메타데이터. VALIDATE에서 예약 |
+| 슬롯 좌표·접근 높이·이동 설정 | Motion 영역. Controller는 해석하지 않음 |
+| 파지 폭·힘 등 | Motion 영역 |
+| grasp_params.json의 z_offset | 기존 position_estimation이 target_pose에 반영하는 책임 유지. Controller에서 중복 보정하지 않음 |
+| timer·서비스 대기·정착·시도 제한 | Controller 파라미터 |
+
+`place_slots.json`, `motion.yaml`과 슬롯 메타데이터 로더는 구현 예정이다.
+파일 구조와 배포 등록은 해당 구현 단계에서 추가하며 기존 grasp 설정 형식은 변경하지 않는다.
+
+서비스 준비 timeout, 명령·좌표·검사 응답 timeout은 각각 독립 파라미터로 둔다.
+기존 문서의 명령 timeout 60초는 전체 처리 상한이 검증된 값이 아니다. 현재 음성 노드는
+웨이크워드에 최대 30초를 사용하고 이후 STT·LLM을 수행한다. 수치는 실제 지연과 담당자 확인을
+거쳐 정하며 무한 대기를 기본값으로 두지 않는다.
+
+초기 비전 설정은 max_age_sec=1.0, 관찰·검사 정착 1.2초, exclude_taken=[]다.
+동일 시간 기준과 이동 완료 시점의 정확성을 전제로 실기에서 검증한다. 검사 화면은 완성
+트레이만 포함한다. 기존 서버는 ROI 필터나 촬영 시각 하한 요청을 지원하지 않는다.
+세부 전제는 02 문서 2.6~2.7절을 따른다.
 
 ## 3. Component 단위 실행
 
-이번 설계의 중심이다. 실행 단위를 "레시피" 가 아니라 **"component 하나"** 로 잡는다.
+### 3.1 검증·flatten·슬롯 예약
 
-### 3.1 레시피를 flatten 한다
+controller_model.py는 ROS·DSR 의존성 없이 명령 검증, Component·Attempt 데이터,
+flatten, 슬롯 예약, expected_counts 생성을 담당한다.
 
-```python
-@dataclass
-class Component:
-    name: str                  # "cup_ramen"
-    slot: str                  # 배치 슬롯
-    index: int                 # 실행 순번
-    attempts: int = 0
-    state: str = "PENDING"     # PENDING | SUCCESS | FAILED | SKIPPED
-    fail_reason: str = ""
-```
+- kit_type은 문자열, items는 비어 있지 않은 배열이어야 한다.
+- 음성 노드의 raw_text/task_id 추가 필드는 추후 제거 예정이다. 과도기에는 실행 해석에서 무시하고 Controller의 task_id를 유지한다.
+- 품목명은 지원 클래스여야 하며 qty는 bool을 제외한 1 이상 정수다. 문자열·실수를 자동 변환하지 않는다.
+- 중복 품목 행은 합산하고 최초 등장 순서로 실행한다. 수량 하나당 Component 하나를 만든다.
+- Component index는 0부터 시작한다. 슬롯은 VALIDATE에서 모두 예약하며 부족하면 이동 전에 FAILED 처리한다.
+- 실패한 Component의 슬롯도 다른 Component에 재할당하지 않는다.
+- expected_counts는 원래 검증된 명령의 총수량이며 실행 결과에 따라 줄이지 않는다.
 
-`{"cup_ramen": 2, "mask": 1}` → Component **3개**.
+| 모델 | 최소 데이터 |
+| --- | --- |
+| Component | 품목, index, slot, 상태, Attempt 목록, 오류 코드·상세, 시작·종료 시각 |
+| Attempt | attempt_no, 상태, 시작·종료 시각, 실패 단계, 오류 코드·상세 |
 
-수량 2 는 Component 2개다. **실행 루프에서 수량 개념이 사라지고 균일한 리스트가 된다.** 이게 요점이다 — 루프가 "이 품목을 몇 개째 집는 중인지" 를 세지 않으므로, 부분 실패 처리가 단순해진다. 3개 중 2번째만 실패하면 그 Component만 `FAILED`가 되고 나머지는 영향이 없다.
+Component 상태는 내부 PENDING, 최종 SUCCESS·FAILED·SKIPPED다. Attempt 번호는 1부터
+연속 증가하며 완료된 시도의 상태는 SUCCESS 또는 FAILED다. 서비스 source는 진단용으로
+기록할 수 있으나 Controller가 검출 토픽을 직접 구독하지 않는다.
 
-### 3.2 실행 루프
+### 3.2 실행과 재시도
 
-```python
-for comp in self.components:
-    self.execute_component(comp)     # 실패해도 다음 Component 로 진행
-    self.publish_status(comp)
-```
+한 Attempt는 OBSERVE 진입부터 좌표 획득과 pick/place 성공 또는 실패까지다.
+`max_attempts=2`는 최초 시도 1회와 재시도 1회, 총 2회를 뜻한다.
 
-한 Component 의 실패가 전체를 중단시키지 않는다. 최종 판정은 `INSPECT` 가 실물을 보고 내린다 — 기획서의 "작업 실행 여부가 아니라 실제 키트 구성 결과를 기준으로 성공 판정" 이 이 구조로 구현된다.
+1. OBSERVE에서 Attempt를 시작하고 관찰·정착 후 좌표를 비동기 요청한다.
+2. 응답 성공 시 target_pose의 6개 값이 유한한 수인지 검사하고 EXECUTE로 전환한다.
+3. EXECUTE의 execute_component()는 저장된 좌표로 pick/place 한 번만 수행한다.
+4. 재시도 오류는 Attempt에 기록하고 이전 target_pose를 폐기한 뒤 OBSERVE로 돌아간다.
+5. Component 결과가 확정되면 한 번 발행한다. 다음 Component가 없으면 INSPECT로 전환한다.
 
-### 3.3 `execute_component()`
+재시도 반복문이나 좌표 서비스 대기를 execute_component() 안에 넣지 않는다.
+stale·not_detected는 재관찰하고, grasp_failed는 필요한 안전 복구 후 재관찰한다.
+시도 소진 시 Component 오류는 max_attempts로 기록하되 마지막 Attempt의 실제 원인은 보존한다.
 
-```python
-def execute_component(self, comp) -> bool:
-    for attempt in range(MAX_ATTEMPTS):        # 2
-        comp.attempts = attempt + 1
+### 3.3 검사·최종 결과·발행
 
-        res = self.request_pose(comp.name)     # /get_component_pose
-        if not res.success:
-            if res.error_code in ("stale", "not_detected"):
-                self.motion.home(); self.settle()   # 재정착 후 재시도
-                continue
-            comp.state, comp.fail_reason = "FAILED", res.error_code
-            return False                       # out_of_workspace 등은 재시도 무의미
+- 최신의 유효한 검사 응답에서 ok=true이면 PASS, ok=false이면 FAIL이다.
+- 검사 timeout·예외·검출 없음·오래된 검출·응답 형식 오류는 ERROR다. srv 표현은 02 문서 2.7절을 따른다.
+- Task SUCCESS 조건은 **검사 PASS이며 TASK_FATAL과 최종 복귀 실패가 없는 것**이다.
+- Component가 FAILED여도 위 조건을 만족하면 Task는 SUCCESS다. 실행 이력과 실물 검사 결과를 각각 보존한다.
+- 검사 미수행 시 inspection_result는 빈 문자열이다. 검사 단계에서 발생한 오류는 ERROR JSON으로 기록한다.
+- TaskStatus는 상태 전이 시 RUNNING, REPORT의 복귀 처리 이후 최종 SUCCESS/FAILED를 한 번 발행한다.
+- ComponentResult는 최종 확정 시 한 번 발행한다. 재시도마다 최종 결과를 발행하지 않는다.
+- TASK_FATAL 시 시작한 Component는 FAILED, 미시작 Component는 SKIPPED로 확정한다. SKIPPED는 Attempt가 없으며 시작·종료 시각에는 건너뛰기로 확정한 시각을 기록한다.
+- 현재 Component가 없는 TaskStatus는 이름을 빈 문자열, index를 -1로 둔다.
+- 복귀 실패 시 REPORT에 머물며 자동 재시작·중복 복귀·중복 최종 발행을 막는다. 복구 후 재가동은 운영자 확인 대상이다.
 
-        params = grasp.params(comp.name)
-        if not self.motion.pick(res.target_pose, params):
-            self.motion.home(); self.settle()   # 헛집음 — 장면이 바뀌었을 수 있다
-            continue
+DB 재고 차감은 기존대로 최초 SUCCESS Component 기준이다. Task 검사 PASS가 FAILED
+Component의 재고를 소급 차감하지 않는다. 기존 DB 집계·재고 정책은 변경하지 않는다.
 
-        self.motion.place(comp.slot, params)
-        comp.state = "SUCCESS"
-        return True
+### 3.4 1단계 계약 검증 시나리오
 
-    comp.state, comp.fail_reason = "FAILED", "max_attempts"
-    return False
-```
-
-**`out_of_workspace` 에서 재시도하지 않는 이유:** 좌표가 작업영역 밖이라는 건 캘리브레이션이나 depth 가 틀렸다는 뜻이고, 다시 찍어도 같은 결과가 나온다. 재시도는 "다시 보면 달라질 수 있는" 실패(`stale`, `not_detected`, 헛집음)에만 쓴다.
-
-**재시도 상한을 2회로 두는 이유:** 무한 재시도는 실패를 감추고 시연을 멈춘다. 2회 실패하면 건너뛰고 `INSPECT` 가 "빠졌다" 고 판정하게 둔다. 실패가 결과에 정직하게 드러나는 게 낫다.
+| 시나리오 | 기대 결과 |
+| --- | --- |
+| 두 Component 배치, 검사 PASS, 복귀 성공 | Task SUCCESS |
+| 첫 파지 실패, 두 번째 시도 성공 | Attempt 2개, Component SUCCESS |
+| 일부 Component 실패, 검사 PASS, 치명 오류 없음·복귀 성공 | 실패 이력 유지, Task SUCCESS |
+| 모든 배치 성공, 검사 FAIL | Task FAILED |
+| 좌표 서비스 timeout | TASK_FATAL, 현재 FAILED·미실행 SKIPPED, REPORT |
+| 검사 서비스 timeout | 검사 ERROR, Task FAILED |
+| 배치 실패 | TASK_FATAL, 미실행 SKIPPED, REPORT |
+| 검사 PASS 이후 복귀 실패 | Task FAILED, REPORT 유지 |
 
 ---
 
@@ -358,22 +409,25 @@ def place(slot_name, params):
 
 ## 6. 실패 모드와 대응
 
-| 실패 모드 | 감지 방법 | 대응 |
-| --- | --- | --- |
-| 품목 미검출 | `error_code=not_detected` | 관찰 자세 재정착 후 재요청 → 그래도 없으면 건너뛰고 `missing` 으로 기록 |
-| depth 무효 (전부 0) | `object_detection` 이 해당 검출을 발행하지 않음 | 위와 동일 경로. 계약상 로봇은 무효 좌표를 아예 못 받는다 |
-| **검출 노후 (stale)** | `detection_age > max_age_sec` | 관찰 자세 재정착 후 재요청. **eye-in-hand 최대 위험** — 팔 이동 전 프레임이면 좌표가 통째로 틀린다 |
-| **후보 소진** | `error_code=no_candidate` | 건너뛰고 `missing` 기록 |
-| **`motion.init()` 미호출** | `RuntimeError` 즉시 발생 | 기동 실패로 처리. 조용히 진행하지 않는다 |
-| 변환 좌표가 작업영역 밖 | `error_code=out_of_workspace` | **움직이지 않는다. 재시도도 하지 않는다** — 다시 봐도 같은 결과다. 반복되면 캘리브레이션 재수행 신호 |
-| 파지 실패 (헛집음) | 폐쇄 후 그리퍼 폭 ≈ 0 | 개방 → 재검출 → 재시도 (최대 2회) |
-| 파지 중 낙하 | 상승 후 폭 재확인 | 재시도. 낙하물 위치는 재검출로 갱신 |
-| 슬롯 좌표 오류 | 배치 후 `INSPECT` 불일치 | 이번 작업은 실패 기록, `place_slots.json` 재실측 |
-| 검사 불일치 (누락/오투입) | `/inspect_kit` 의 `ok=false` | `REPORT` 에 `missing`/`unexpected` 기록. 자동 보정은 확장 범위 |
-| LLM 크레딧 소진 | `error_code=openai_quota_exhausted` | 즉시 중단 + 에러 로그. 재시도 무의미 |
-| 로봇 통신 두절 | `movel` 예외 | 그리퍼 개방 시도 후 노드 종료. 조용히 계속하지 않는다 |
+명령 서비스가 응답으로 알린 실패는 REPORT에서 FAILED로 기록한다. wakeword_timeout,
+stt_failed, invalid_command, openai_error는 재대기하며 openai_rate_limit은 설정된
+재요청 간격 후 재대기한다. openai_quota_exhausted와 명령 서비스의 클라이언트 timeout·
+future 예외·준비 timeout은 자동 재시작을 차단한다. 서버의 이전 요청이 끝났다고 가정하지 않는다.
+물리 동작을 시작하지 않은 명령 실패는 불필요한 복귀 없이 REPORT를 완료할 수 있다.
+세부 정책은 02 문서 3.1절을 따른다.
 
-**공통 원칙:** 좌표가 의심스러우면 움직이지 않는다. 로봇은 물리적으로 움직이는 장비고, 잘못된 좌표 하나가 장비나 사람을 상하게 한다. "일단 해보고 안 되면 말고" 는 소프트웨어에서나 통한다.
+| 등급·상황 | 예시 | Controller 처리 |
+| --- | --- | --- |
+| RETRYABLE | stale, not_detected, grasp_failed | Attempt 기록, 상한 내 OBSERVE 재시도 |
+| COMPONENT_FATAL | no_candidate, out_of_workspace, max_attempts | Component FAILED 후 다음 Component. 없으면 INSPECT |
+| TASK_FATAL | 배치·이동·복구 예외, 명령 검증 실패, 서비스 준비·응답 timeout, future 예외, 잘못된 좌표 응답 | 실행 중단, 미완료 결과 정리 후 REPORT |
+| 검사 FAIL | 유효한 최신 검사에서 구성 불일치 | 검사 결과 기록, REPORT에서 Task FAILED |
+| 검사 ERROR | 검사 통신 실패, 검출 없음·노후, 응답 오류 | TASK_FATAL, 검사 ERROR 기록 후 REPORT |
+| EMERGENCY | 로봇 통신 두절·충돌·긴급 정지에 대한 별도 중단 프로토콜 | 이번 범위 밖. 실제 중단·감지 기능이 구현되었다고 가정하지 않음 |
+
+분류하지 못한 실행 예외는 TASK_FATAL로 처리한다. Motion 상세 오류 분류는 별도 계약에서 확정한다.
+Component 실패만으로 검사 missing을 만들어 넣지 않는다. missing/unexpected는 실제 검사 응답에서 기록한다.
+out_of_workspace는 원인을 단정하지 않고 좌표 사용을 거부한 뒤 Component를 실패 처리한다.
 
 ---
 
@@ -381,6 +435,6 @@ def place(slot_name, params):
 
 기획서가 확장 기능으로 분류한 것들. 지금 설계에 자리만 남겨두고 구현하지 않는다.
 
-- 검사 결과 기반 **자동 보정** (누락 품목 추가 파지, 오투입 품목 방출) — `InspectKit` 응답의 `missing`/`unexpected` 가 이미 필요한 정보를 담고 있고, 보정도 결국 Component 실행이다. `missing` 을 Component 리스트로 다시 flatten 해서 `EXECUTE` 를 한 번 더 도는 것으로 붙는다.
+- 검사 결과 기반 **자동 보정** (누락 품목 추가 파지, 오투입 품목 방출) — `InspectKit` 응답의 `missing`/`unexpected` 가 이미 필요한 정보를 담고 있고, 보정도 결국 Component 실행이다. 보정 대상과 슬롯을 별도로 검증한 후 `OBSERVE`부터 다시 실행하는 정책이 필요하다.
 - **3차원 형상 기반 파지점** — 현재는 mask 무게중심(xy) + mask 최소폭 축(rz, [§4.2](#42-단계별-상세)) + 수직 하향(rx,ry) 조합이다. 물체가 기울어진 채로 놓였을 때의 완전한 3D 파지 자세(포인트클라우드 기반)는 별개 작업으로 남긴다.
 - **DB 분석 기능 확장** — 현재 로봇은 `/kit/task_status`와 `/kit/component_result`를 발행하고, 음성 노드는 `/kit/command_result`를 발행한다. DB 노드는 이를 저장하고 신규 `SUCCESS` Component의 재고를 차감한다. 집계 대시보드나 장기 분석 기능은 확장 범위다.
