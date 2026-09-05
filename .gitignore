@@ -222,6 +222,7 @@ __marimo__/
 .claude
 .codex
 .serena
+.codegraph
 .agents
 AGENTS.md
 
