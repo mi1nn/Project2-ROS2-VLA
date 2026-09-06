@@ -1,15 +1,24 @@
 import os
 import yaml
+import json
 
 from ament_index_python.packages import get_package_share_directory
 from .onrobot import RG
 
+
+import DR_init
+ROBOT_ID = "dsr01"
+ROBOT_MODEL = "m0609"
 
 class Motion:
     def __init__(self, node):
 
         if node is None:
             raise ValueError("ROS 2 node is required for DSR initialization.")
+
+        DR_init.__dsr__id = ROBOT_ID
+        DR_init.__dsr__model = ROBOT_MODEL
+        DR_init.__dsr__node = node
 
         config_path = os.path.join(
             get_package_share_directory("kit_robot"), "config", "motion.yaml"
@@ -19,6 +28,17 @@ class Motion:
             config = yaml.safe_load(file)["motion"]
 
         self.positions = config["positions"]
+        self.place_config = config['place']
+        self.place_slots = self.place_config['slots']
+
+        grasp_params_path = os.path.join(
+            get_package_share_directory('kit_robot'),
+            'resource',
+            'grasp_params.json',
+            )
+
+        with open(grasp_params_path, 'r', encoding='utf-8') as file:
+            self.grasp_params = json.load(file)
 
         try:
             from DSR_ROBOT2 import (
@@ -91,7 +111,7 @@ class Motion:
         )
 
     def get_current_pose(self):
-        (pose,) = self.get_current_posx(ref=self.DR_BASE)
+        pose = self.get_current_posx(ref=self.DR_BASE)[0]
         if pose is None:
             raise RuntimeError("Failed to get current posx")
         return list(pose)
@@ -107,23 +127,35 @@ class Motion:
             raise RuntimeError(f"movel failed: result={result}, pose={pose}")
         return result
 
-    def pick_component(self, target_pose, vel=100, acc=200, approach_height=100):
+    def pick_component(self, component_name, target_pose, vel=100, acc=200):
         pose = list(target_pose)
         if len(pose) != 6:
             raise ValueError("target_pose must be [x, y, z, rx, ry, rz]")
 
-        result = 0
+        params = self.grasp_params.get(component_name, self.grasp_params['_default'])
+        open_width = params['width']
+        grip_force = params['force']
+        approach_height = params['approach']
+
+        result = False
         pick_pose_down = pose.copy()
         pick_pose_up = pose.copy()
         pick_pose_up[2] += approach_height
 
+        print(
+            f"Pick component: {component_name}, "
+            f"width={open_width}, "
+            f"force={grip_force}, "
+            f"approach={approach_height}"
+        )
+
         for i in range(5):
-            self.rg.open_gripper()
+            self.rg.move_gripper(open_width, force_val=grip_force)
             self.wait(2.0)
             self.move_linear(pick_pose_up, vel=vel, acc=acc)
             self.wait(0.5)
             self.move_linear(pick_pose_down, vel=vel, acc=acc)
-            self.rg.close_gripper()
+            self.rg.close_gripper(force_val=grip_force)
             self.wait(2.0)
 
             gripper_width = self.rg.get_width()
@@ -133,7 +165,7 @@ class Motion:
 
             if gripper_width > 13:
                 print('Success to grip object')
-                result = 1
+                result = True
                 break
             else:
                 print(f'{i+1} try, Failed to grip object')
@@ -141,6 +173,9 @@ class Motion:
 
             if i == 4:
                 print('Failed to grip object in all try')
-                result = -1
+                result = False
 
         return result
+
+    def place_component(self, component_name, slot_name):
+        return 
