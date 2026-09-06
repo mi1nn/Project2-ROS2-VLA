@@ -19,5 +19,15 @@ controller:
       - slot_5
       - slot_6
 
+    # 명령 반환 대기
     service_ready_timeout_sec: 20.0
     command_timeout_sec: 60.0
+
+    # 관찰 대기
+    pose_timeout_sec: 10.0
+    max_age_sec: 1.0
+    observation_settle_sec: 1.2
+
+    # 검사 대기
+    inspect_timeout_sec: 5.0
+    inspection_settle_sec: 1.2

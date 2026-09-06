@@ -149,7 +149,7 @@ string         error_code       # 아래 표 참조
 | `not_detected` | 해당 클래스가 검출에 없음 | 관찰 자세 재정착 후 재요청 |
 | `stale` | 검출이 `max_age_sec` 보다 오래됨 | 정착 대기 후 재요청 |
 | `out_of_workspace` | 변환 좌표가 작업영역 밖 | **움직이지 않는다.** `FAILED`로 기록하고 다음 Component 진행 |
-| `no_candidate` | 후보가 `exclude_taken`으로 전부 소진 | `FAILED`로 기록하고 최종 검사에서 `missing` 확인 |
+| `no_candidate` | 후보가 `exclude_taken`으로 전부 소진 | Component FAILED 후 다음 품목. 실제 부족 여부는 최종 검사로 확인 |
 
 ### 2.5 현재 posx 를 request 로 넘기는 이유
 
@@ -212,7 +212,7 @@ float64  detection_age
 **현재 구현과 Controller 판정:** InspectKit에는 success/error_code가 없다.
 검출 캐시가 없으면 ok=false, detection_age=inf이며 오래된 검출도 ok=false로 반환한다.
 나이가 유한하고 0 이상이며 요청한 max_age_sec 이내인지 먼저 확인한다. 범위를 벗어나거나 통신 timeout·future 예외·응답 형식 오류이면 ERROR다.
-유효한 응답만 ok=true → PASS, ok=false → FAIL로 해석한다. 
+유효한 응답만 ok=true → PASS, ok=false → FAIL로 해석한다.
 
 actual_counts 길이는 expected_classes와 같고 수량은 음수가 아니어야 한다.
 
@@ -245,6 +245,9 @@ string error_code
 `kit_type`과 `items`만 넣고, `task_id`와 `raw_text`는 `CommandResult`의 별도 필드로 전달한다.
 
 **웨이크워드 감지 범위 — 현재 구현 확인.** get_command 콜백 내부에서 마이크를 열어 최대 30초 동안 웨이크워드를 기다린 뒤 닫는다. Controller는 LISTEN에서 요청을 하나만 보낸다. 클라이언트 timeout은 서버 콜백 취소를 뜻하지 않으므로 아래 재시작 정책을 따른다.
+
+**반복 작업:** 응답 반환 후 음성 노드는 다음 서비스 요청을 기다린다. 스스로 웨이크워드 대기를 다시 시작하지 않는다. Controller의 VALIDATE~REPORT 동안에는 새 명령 요청이 없고, 키팅이 끝나 IDLE → LISTEN으로 돌아가야 마이크 감지가 다시 시작된다. wakeword_timeout은 실패 응답이며 노드 종료가 아니다. Controller의 명령 응답 제한 60초도 키팅 시간을 포함하지 않는다.
+다만 현재 is_wakeup/close 예외는 실패 응답으로 감싸지 않으므로 별도 보완 대상이다.
 
 **`command_json` 스키마** (success=true 일 때만 유효):
 
@@ -296,6 +299,8 @@ DB 노드는 아래 세 토픽을 구독한다. MongoDB 필드 매핑, 검증 �
 
 ### 4.1 `msg/CommandResult.msg` (음성 → DB)
 
+아래는 목표 발행 계약이다. 현재 get_keyword.py의 서비스 응답은 구현되어 있으나 CommandResult publisher 연결은 후속 작업이다. Controller의 결과 토픽 두 개는 발행 구현이 되어 있다.
+
 ```
 string task_id
 bool success
@@ -332,8 +337,7 @@ flatten 후 개수다. `inspection_result`는 `result`, `expected_counts`, `actu
 
 result는 PASS/FAIL/ERROR, expected_counts는 품목별 객체, actual_counts는 품목별 객체 또는 null, missing/unexpected는 배열이다. inspected_at은 timezone을 포함한 ISO 시각이다.
 검사 오류의 무효 수량은 actual_counts=null로 기록하고 inf/NaN/음수 detection_age는 null로 정규화한다. 검사 미수행 시 inspection_result는 빈 문자열이다. 현재 Component가 없으면
-이름은 빈 문자열, index는 -1이다. 상태 전이마다 RUNNING을, REPORT에서 복귀 결과를 반영한 최종 SUCCESS/FAILED를 한 번 발행한다. 이는 Controller 발행 횟수 규칙이며 전송·DB 저장의
-정확히 한 번 보장을 뜻하지 않는다.
+이름은 빈 문자열, index는 -1이다. IDLE을 제외한 상태 전이마다 RUNNING을, REPORT에서 복귀 결과를 반영한 최종 SUCCESS/FAILED를 한 번 발행한다. 이는 Controller 발행 횟수 규칙이며 전송·DB 저장의 정확히 한 번 보장을 뜻하지 않는다.
 
 ### 4.3 `msg/ComponentResult.msg` (로봇 → DB)
 

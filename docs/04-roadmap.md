@@ -13,7 +13,7 @@
 | 1 | 09-02 (수) | 패키지 5개 스캐폴딩. **`kit_interfaces` srv/msg 확정 후 팀 공유**. `ros2 topic list \| grep dsr` 로 로봇 상태 토픽 확인 | `colcon build` 통과, `ros2 interface show` 로 8개 타입 확인 |
 | 2 | 09-03 (목) | `ImgNode` 이식, `/detection/objects` **mock 발행** + `position_estimation` 골격 | `topic echo` + `service call` 왕복 성공 |
 | 3 | 09-04 (금) | **hand-eye 캘리브레이션 재수행**, `T_gripper2camera.npy` 산출·검증 | `verify.py` 재투영 오차 확인 |
-| 4 | 09-05 (토) | `motion.py`: `init` / `home` / `pick` / `place`, RG2 연동 | 손으로 입력한 좌표로 파지 성공 |
+| 4 | 09-05 (토) | `motion.py`: Controller의 Motion 객체 계약 구현, RG2 연동 | 손으로 입력한 좌표로 파지 성공 |
 | 5 | 09-06 (일) | 좌표 파이프라인 결선(무게중심+깊이+역투영 + **mask 최소폭 축 기반 `rz` 계산**). 실제 YOLO seg 모델 투입 | 1개 품목 자동 파지 성공. 회전 정렬은 실패해도 `rz` 폴백([03 §4.2](03-system-flow.md))으로 진행 |
 | 6 | 09-07 (월) | `controller`: **Component flatten + 실행 루프** + 상태머신 + `/kit/task_status`, `/kit/component_result` | 3 Component 연속 파지·배치 및 결과 발행 |
 | 7 | 09-08 (화) | 음성/LLM 노드와 `/kit/command_result` 결합, `/inspect_kit` 재검사 구현 | E2E 1회 관통 |
@@ -51,7 +51,7 @@ reference/corecode/Calibration_Tutorial/
 | --- | --- | --- |
 | 팀원의 YOLO seg 모델 | Day 5 실물 검출 | **Day 2 의 mock 발행자.** 고정 `DetectionArray` 를 1Hz 로 흘려 `position_estimation` 결선을 먼저 끝낸다 |
 | 로봇 상태 토픽(posx) 부재 | position_estimation 의 hand-eye 입력 | **이미 우회됨.** controller 가 request 에 `robot_posx` 를 담는다 ([02 2.5절](02-interfaces.md)) |
-| 팀원의 음성/LLM 노드 | Day 7 E2E | `command_json` 을 파일이나 `ros2 service call` 로 직접 주입해 Day 6 까지 진행 |
+| 팀원의 음성/LLM 노드 | Day 7 E2E | `controller_demo_services.py`와 MotionDemo로 서비스 응답과 상태 흐름 확인 |
 | 로봇 실물 점유 (팀 공유) | Day 3-5 | 좌표 변환·상태머신은 로봇 없이 self-check 로 검증. 로봇 시간은 캘리브레이션과 파지 튜닝에만 쓴다 |
 | 키팅 트레이·품목 실물 | Day 8 튜닝 | 대체 물체로 파지 시퀀스만 먼저 검증 |
 
@@ -88,7 +88,7 @@ src/kit_vision/,  src/kit_voice/,  src/kit_robot/,  src/kit_db/
 
 ### Day 4 — 모션 기본기
 
-`motion.py` + `onrobot.py`. `init()` → `home()` → 좌표를 손으로 입력해서 `pick()` / `place()` 가 도는지 본다. 이 단계에서 `place_slots.json` 의 슬롯 좌표를 실측해 채운다 (`reference/cobot2/rokey_cobot2/rokey_cobot2/basic/get_current_pos.py` 로 현재 자세를 읽어 기록).
+`motion.py` + `onrobot.py`. Motion 초기화 후 `move_home()`과 `pick_component()` / `place_component()`를 확인한다. 현재 main의 MotionDemo를 실제 객체로 교체하기 전 호출 계약을 맞춘다. 이 단계에서 `place_slots.json` 의 슬롯 좌표를 실측해 채운다 (`reference/cobot2/rokey_cobot2/rokey_cobot2/basic/get_current_pos.py` 로 현재 자세를 읽어 기록).
 
 **속도를 낮게 시작한다.** 레퍼런스 기본값이 `VELOCITY, ACC = 60, 60` 인데, 처음 좌표를 검증할 때는 더 낮춰서 이상하면 멈출 수 있게 한다.
 
@@ -102,7 +102,10 @@ src/kit_vision/,  src/kit_voice/,  src/kit_robot/,  src/kit_db/
 
 ### Day 6 — 상태머신
 
-`controller.py`. 레시피를 **Component 리스트로 flatten** 하고 하나씩 `execute_component()` 를 돌린다. 실패한 Component 를 건너뛰고 다음으로 넘어가는지가 이날의 핵심 검증이다. 음성 노드가 아직 없으면 `command_json` 을 직접 주입해서 시험한다.
+`controller_model.py`에서 명령을 검증하고 Component를 생성한다. `controller.py`의
+OBSERVE에서 좌표를 요청하고 handle_execute()에서 Component 하나를 처리한다.
+재시도와 다음 품목은 OBSERVE로 돌아가며 결과 확정 후 토픽을 발행한다.
+음성·비전 없이 확인할 때는 데모 서비스 세 개와 MotionDemo를 함께 사용한다.
 
 ### Day 7 — 통합
 
