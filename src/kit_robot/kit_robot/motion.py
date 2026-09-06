@@ -59,7 +59,7 @@ class Motion:
 
         self.rg = RG("rg2", "192.168.1.1", 502)
 
-    def home(self):
+    def move_home(self):
         config = self.positions["home"]
         if config["type"] == "joint":
             home_pos = self.posj(config["pos"])
@@ -68,29 +68,29 @@ class Motion:
 
         return self.movej(home_pos, vel=config["joint_vel"], acc=config["joint_acc"])
 
-    def pick_camera(self):
-        config = self.positions["pick_camera"]
+    def move_to_observation_pose(self):
+        config = self.positions["observation_pose"]
         if config["type"] == "joint":
             pick_camera_pos = self.posj(config["pos"])
         else:
-            raise TypeError("pick_camera position must be 'joint'")
+            raise TypeError("observation_pose must be 'joint'")
 
         return self.movej(
             pick_camera_pos, vel=config["joint_vel"], acc=config["joint_acc"]
         )
 
-    def place_camera(self):
-        config = self.positions["place_camera"]
+    def move_to_inspection_pose(self):
+        config = self.positions["inspection_pose"]
         if config["type"] == "joint":
             place_camera_pos = self.posj(config["pos"])
         else:
-            raise TypeError("place_camera position must be 'joint'")
+            raise TypeError("inspection_pose must be 'joint'")
 
         return self.movej(
             place_camera_pos, vel=config["joint_vel"], acc=config["joint_acc"]
         )
 
-    def current_posx(self):
+    def get_current_pose(self):
         (pose,) = self.get_current_posx(ref=self.DR_BASE)
         if pose is None:
             raise RuntimeError("Failed to get current posx")
@@ -107,26 +107,40 @@ class Motion:
             raise RuntimeError(f"movel failed: result={result}, pose={pose}")
         return result
 
-    def pick(self, target_pose, vel=100, acc=200, approach_height=100):
+    def pick_component(self, target_pose, vel=100, acc=200, approach_height=100):
         pose = list(target_pose)
         if len(pose) != 6:
             raise ValueError("target_pose must be [x, y, z, rx, ry, rz]")
+
+        result = 0
         pick_pose_down = pose.copy()
         pick_pose_up = pose.copy()
         pick_pose_up[2] += approach_height
 
-        self.rg.open_gripper()
-        self.wait(2.0)
-        self.move_linear(pick_pose_up, vel=vel, acc=acc)
-        self.wait(0.5)
-        self.move_linear(pick_pose_down, vel=vel, acc=acc)
-        self.rg.close_gripper()
-        self.wait(2.0)
+        for i in range(5):
+            self.rg.open_gripper()
+            self.wait(2.0)
+            self.move_linear(pick_pose_up, vel=vel, acc=acc)
+            self.wait(0.5)
+            self.move_linear(pick_pose_down, vel=vel, acc=acc)
+            self.rg.close_gripper()
+            self.wait(2.0)
 
-        gripper_width = self.rg.get_width()
+            gripper_width = self.rg.get_width()
 
-        self.move_linear(pick_pose_up, vel=vel, acc=acc)
+            self.move_linear(pick_pose_up, vel=vel, acc=acc)
+            print(f'gripper_width: {gripper_width}')
 
-        print(f'gripper_width: {gripper_width}')
+            if gripper_width > 13:
+                print('Success to grip object')
+                result = 1
+                break
+            else:
+                print(f'{i+1} try, Failed to grip object')
+                
 
-        return gripper_width > 13
+            if i == 4:
+                print('Failed to grip object in all try')
+                result = -1
+
+        return result
