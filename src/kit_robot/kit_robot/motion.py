@@ -1,5 +1,6 @@
 import os
 import yaml
+import rclpy
 import DR_init
 
 from ament_index_python.packages import get_package_share_directory
@@ -32,9 +33,15 @@ class Motion:
 
         self.positions = config["positions"]
 
+        # DSR_ROBOT2는 서비스 이름을 자기 노드 네임스페이스 기준 상대경로로 연다
+        # (예: "dsr_controller2/motion/move_joint").  robot_id는 서비스 이름에
+        # 안 들어가므로, Controller 노드(네임스페이스 없음)를 그대로 넘기면
+        # /dsr01/dsr_controller2/... 를 못 찾고 영원히 대기한다.
+        # 레퍼런스(robot_control.py)처럼 namespace=ROBOT_ID인 전용 노드를 따로 둔다.
         # DSR_ROBOT2는 import 시점에 DR_init.__dsr__node로 서비스 client를 만들기
         # 때문에 import 전에 반드시 설정해야 한다.
-        _set_dr_init(node)
+        self._dsr_node = rclpy.create_node("dsr_interface", namespace=ROBOT_ID)
+        _set_dr_init(self._dsr_node)
 
         try:
             from DSR_ROBOT2 import (

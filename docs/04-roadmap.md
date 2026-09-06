@@ -90,6 +90,13 @@ src/kit_vision/,  src/kit_voice/,  src/kit_robot/,  src/kit_db/
 
 `motion.py` + `onrobot.py`. Motion 초기화 후 `move_home()`과 `pick_component()` / `place_component()`를 확인한다. 현재 main의 MotionDemo를 실제 객체로 교체하기 전 호출 계약을 맞춘다. 이 단계에서 `place_slots.json` 의 슬롯 좌표를 실측해 채운다 (`reference/cobot2/rokey_cobot2/rokey_cobot2/basic/get_current_pos.py` 로 현재 자세를 읽어 기록).
 
+**`WORKSPACE` 실측도 이 단계에서 함께 한다.** `position_estimation.py`의 `WORKSPACE`(현재 `{"x": (200,800), "y": (-400,400), "z": (0,500)}`, mm — [03 §4.3](03-system-flow.md)와 동일 값)는 실측 전 placeholder다.
+
+1. `get_current_pos.py`로 로봇을 낮은 속도로 수동 이동시키며, 물품 진열 트레이·키팅 트레이가 실제로 놓일 영역의 x/y 극단과 접근 높이 z 극단에서 `robot_posx`를 읽어 기록한다.
+2. 로봇의 물리적 최대 도달 범위 그대로 쓰지 않는다 — 테이블·카메라 마운트·케이블과의 충돌, 특이점 근처 구간을 뺀 안전 여유를 둔다.
+3. 기록한 min/max로 `position_estimation.py`의 `WORKSPACE`와 `docs/03-system-flow.md` §4.3의 동일 상수를 **함께** 갱신한다 — 두 곳이 중복 정의라 한쪽만 고치면 어긋난다.
+4. `out_of_workspace` 오탐(범위를 너무 좁게 잡아 정상 좌표까지 거르는 경우)·누락(너무 넓게 잡아 실제로 못 가는 좌표를 통과시키는 경우)은 Day 5 첫 자동 파지에서 실좌표로 재확인한다.
+
 **속도를 낮게 시작한다.** 레퍼런스 기본값이 `VELOCITY, ACC = 60, 60` 인데, 처음 좌표를 검증할 때는 더 낮춰서 이상하면 멈출 수 있게 한다.
 
 ### Day 5 — 첫 자동 파지
