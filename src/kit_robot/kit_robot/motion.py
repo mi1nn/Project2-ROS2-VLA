@@ -107,7 +107,7 @@ class Motion:
         )
 
     def get_current_pose(self):
-        (pose,) = self.get_current_posx(ref=self.DR_BASE)
+        pose, _ = self.get_current_posx(ref=self.DR_BASE)
         if pose is None:
             raise RuntimeError("Failed to get current posx")
         return list(pose)

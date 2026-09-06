@@ -50,6 +50,9 @@ class Controller(Node):
         self.motion = motion
         self.state = State.IDLE
         self.state_entered = True
+        
+        ## test
+        # self.timer = self.create_timer(0.1, self.timer_tick)
 
         # 상태별 처리기 매핑: timer는 이 표에서 현재 상태의 메서드를 선택한다.
         self.handlers = {
@@ -177,7 +180,7 @@ class Controller(Node):
             raise ValueError("재시작 간격은 유한한 양수여야 합니다.")
 
         # 상태 확인 주기 0.1초. 동기 Motion 호출 중에는 이 주기가 보장되지 않는다.
-        self.timer = self.create_timer(0.1, self.timer_tick)
+        # self.timer = self.create_timer(0.1, self.timer_tick)
 
 
     def transition_to(self, next_state: State):
@@ -1059,7 +1062,10 @@ def main(args=None):
     node.motion = Motion(node)
 
     try:
-        rclpy.spin(node)
+        # rclpy.spin(node)
+        while rclpy.ok():
+            rclpy.spin_once(node, timeout_sec = 0.1)
+            node.timer_tick()
     except KeyboardInterrupt:
         pass
     finally:
