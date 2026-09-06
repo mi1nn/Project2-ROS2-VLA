@@ -1,8 +1,20 @@
 import os
 import yaml
+import DR_init
 
 from ament_index_python.packages import get_package_share_directory
 from .onrobot import RG
+
+ROBOT_ID = "dsr01"
+ROBOT_MODEL = "m0609"
+
+
+def _set_dr_init(node):
+    '''DR_init.__dsr__* 설정. class 본문에서 직접 쓰면 name mangling으로
+    엉뚱한 속성(_Motion__dsr__id 등)에 저장되므로 반드시 모듈 레벨 함수로 둔다.'''
+    DR_init.__dsr__id = ROBOT_ID
+    DR_init.__dsr__model = ROBOT_MODEL
+    DR_init.__dsr__node = node
 
 
 class Motion:
@@ -19,6 +31,10 @@ class Motion:
             config = yaml.safe_load(file)["motion"]
 
         self.positions = config["positions"]
+
+        # DSR_ROBOT2는 import 시점에 DR_init.__dsr__node로 서비스 client를 만들기
+        # 때문에 import 전에 반드시 설정해야 한다.
+        _set_dr_init(node)
 
         try:
             from DSR_ROBOT2 import (

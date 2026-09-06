@@ -1055,7 +1055,8 @@ def main(args=None):
     '''Motion를 주입한 Controller를 실행하고 종료 시 ROS 자원을 정리한다.'''
     rclpy.init(args=args)
     # node = Controller(motion=MotionDemo())
-    node = Controller(motion=Motion())
+    node = Controller()
+    node.motion = Motion(node)
 
     try:
         rclpy.spin(node)

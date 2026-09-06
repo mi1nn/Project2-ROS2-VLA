@@ -62,6 +62,13 @@ services:
     network_mode: host   # 호스트에서 도는 realsense2_camera 토픽을 그대로 구독
     environment:
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-20}   # 호스트 realsense2_camera와 같은 도메인이어야 토픽이 보인다
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
 
   vision-debug:
     profiles: ["debug"]   # `docker compose up -d`(전체 기동) 기본값에서 제외 — xhost 없이 뜨면 크래시
@@ -78,6 +85,13 @@ services:
       - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-20}
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
 
 volumes:
   postgres_data:

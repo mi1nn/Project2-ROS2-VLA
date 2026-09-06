@@ -1,6 +1,7 @@
 # 호스트 우분투에서 ultralytics가 깨져서 kit_vision(YOLO 추론)만 격리 실행하는 이미지.
 # realsense2_camera 드라이버는 호스트에 그대로 둔다 — USB 패스스루가 필요 없고,
 # --network host 로 호스트의 카메라 토픽을 그대로 구독한다.
+# GPU 추론: compose.yaml에서 --gpus 로 nvidia 런타임을 넘겨받는다 (host: nvidia-container-toolkit 설치됨).
 FROM ros:jazzy-ros-base
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -14,11 +15,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Ubuntu 24.04(Noble) 이미지는 PEP 668 externally-managed 환경이라 시스템 pip 설치엔
 # --break-system-packages 가 필요하다. 컨테이너 전용 이미지라 venv 로 나눌 이유가 없다.
 #
-# torch를 먼저 CPU 전용 wheel로 깔아둔다. 안 그러면 ultralytics가 끌어오는 기본 torch가
-# CUDA용이라 nvidia-cudnn/cublas/nccl 등으로 이미지가 수 GB 불어난다 — 이 컨테이너엔
-# GPU 패스스루(--gpus, nvidia-container-toolkit) 설정이 없어서 그 무게가 전부 낭비다.
-RUN pip install --no-cache-dir --break-system-packages \
-        torch --index-url https://download.pytorch.org/whl/cpu
+# torch 기본(PyPI) wheel은 CUDA 런타임(cublas/cudnn/nccl 등)을 자체 내장해서 설치하므로
+# 호스트 CUDA 툴킷 버전을 맞출 필요 없이 드라이버(NVIDIA 595.x, CUDA 13.2)와 바로 호환된다.
+# 이미지가 CPU 전용 대비 수 GB 커지는데, GPU 추론이 목적이라 이 무게는 정당하다.
+RUN pip install --no-cache-dir --break-system-packages torch
 # ros-jazzy-cv-bridge가 apt(python3-numpy)로 numpy를 이미 깔아놓는데, dpkg 설치본은
 # pip 메타데이터(RECORD)가 없어 pip가 업그레이드하려다 "Cannot uninstall"로 죽는다.
 # numpy만 --ignore-installed로 따로 갈아치운다 — 이 플래그를 ultralytics 설치에 같이 쓰면
