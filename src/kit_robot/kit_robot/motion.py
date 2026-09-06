@@ -144,3 +144,23 @@ class Motion:
                 result = -1
 
         return result
+
+    '''
+    미구현 부분
+    중간 점검을 위해 log만 송출
+    '''
+    def place_component(
+        self,
+        component_name: str,
+        slot_name: str,
+    ) -> None:
+        """슬롯 이름을 출력한다. 실제 슬롯 좌표는 조회하지 않는다."""
+        print(
+            f"[MotionDemo] place_component: {component_name}, "
+            f"slot={slot_name}"
+        )
+
+    def recover_to_safe_pose(self) -> None:
+        """그리퍼 개방과 안전 복귀가 완료된 것으로 처리한다."""
+        self._current_pose = [0.0] * 6
+        print("[MotionDemo] recover_to_safe_pose: 개방 및 안전 복귀")
