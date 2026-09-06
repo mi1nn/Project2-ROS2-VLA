@@ -27,6 +27,8 @@ from kit_robot.controller_model import (
 # 데모 실행용 의존성: 실제 운용 시 main의 주입 객체를 구현된 Motion으로 교체한다.
 from kit_robot.motion_demo import MotionDemo
 
+from kit_robot.motion import Motion
+
 class State(Enum):
     '''명령 수신부터 최종 보고까지 Controller의 일곱 실행 상태를 정의한다.'''
     IDLE = auto()
@@ -1050,9 +1052,10 @@ class Controller(Node):
 
 
 def main(args=None):
-    '''MotionDemo를 주입한 Controller를 실행하고 종료 시 ROS 자원을 정리한다.'''
+    '''Motion를 주입한 Controller를 실행하고 종료 시 ROS 자원을 정리한다.'''
     rclpy.init(args=args)
-    node = Controller(motion=MotionDemo())
+    # node = Controller(motion=MotionDemo())
+    node = Controller(motion=Motion())
 
     try:
         rclpy.spin(node)
