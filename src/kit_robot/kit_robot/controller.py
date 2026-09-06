@@ -44,7 +44,7 @@ class Controller(Node):
     '''Motion과 비동기 서비스를 연결해 Component 순차 실행과 결과 발행을 관리한다.'''
     def __init__(self, motion=None):
         '''Motion을 주입받고 상태 처리기, ROS 파라미터, 서비스·토픽 및 timer를 구성한다.'''
-        super().__init__("controller")
+        super().__init__("controller", namespace="/dsr01")
 
         # Motion 의존성과 상태 진입 표시: entered=True인 tick에서만 진입 작업을 수행한다.
         self.motion = motion

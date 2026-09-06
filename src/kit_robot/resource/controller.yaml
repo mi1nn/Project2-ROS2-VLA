@@ -1,4 +1,4 @@
-controller:
+/dsr01/controller:
   ros__parameters:
     supported_names:
       - 마스크
