@@ -20,9 +20,10 @@ from kit_interfaces.srv import GetComponentPose, InspectKit
 
 PACKAGE_NAME = "kit_robot"
 
-# 검출 토픽은 상시 발행 + 최신 검출만 의미 있음 → RELIABLE, depth=1 (02-interfaces.md §2.3).
-# 구독 쪽도 동일 QoS 라야 매칭된다.
-DETECTION_QOS = QoSProfile(reliability=ReliabilityPolicy.RELIABLE, depth=1)
+# 검출 토픽은 상시 발행 + 최신 검출만 의미 있음 → BEST_EFFORT, depth=1 (02-interfaces.md §2.3).
+# 구독 쪽도 동일 QoS 라야 매칭된다. 신선도는 max_age_sec 로 이 노드가 검사하므로
+# 트랜스포트의 재전송 보장은 불필요하다.
+DETECTION_QOS = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, depth=1)
 
 # 레퍼런스 기본값. 품목별 실측치는 resource/grasp_params.json 이 있으면 그쪽 우선 (Day 8 튜닝).
 DEPTH_OFFSET = -35.0
@@ -230,16 +231,25 @@ class PositionEstimationNode(Node):
         return response
 
     def inspect_kit_callback(self, request, response):
-        objects = self.latest.objects if self.latest is not None else []
+        # InspectKit.srv 엔 error_code 가 없지만, 최신성 판정은 GetComponentPose 와
+        # 같은 가드를 재사용해야 한다 (02-interfaces.md §2.7). stale 이면 카운팅과
+        # 무관하게 ok=False — 우연히 개수가 맞아도 낡은 프레임 기준 통과를 허용하지 않는다.
+        response.detection_age = self._age_sec() if self.latest is not None else float("inf")
+        max_age = request.max_age_sec if request.max_age_sec > 0 else DEFAULT_MAX_AGE_SEC
+
+        if self.latest is None or response.detection_age > max_age:
+            response.ok = False
+            response.missing = []
+            response.unexpected = []
+            response.actual_counts = [0] * len(request.expected_classes)
+            return response
+
         ok, missing, unexpected, actual_counts = inspect_counts(
-            objects, list(request.expected_classes), list(request.expected_counts))
+            self.latest.objects, list(request.expected_classes), list(request.expected_counts))
         response.ok = ok
         response.missing = missing
         response.unexpected = unexpected
         response.actual_counts = actual_counts
-        # InspectKit.srv 엔 error_code 가 없다 — 신선도 판단은 detection_age 를 보고
-        # controller 가 한다. 검출을 한 번도 못 받았으면 무한대로 표시한다.
-        response.detection_age = self._age_sec() if self.latest is not None else float("inf")
         return response
 
 
