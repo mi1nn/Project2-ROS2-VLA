@@ -40,6 +40,14 @@ class State(Enum):
     REPORT = auto()
 
 
+class TransitionCategory(Enum):
+    '''상태 전이 원인을 정상·재시도·Component 실패·작업 실패로 구분한다.'''
+    NORMAL = "NORMAL"
+    RETRY = "RETRY"
+    COMPONENT_FATAL = "COMPONENT_FATAL"
+    TASK_FATAL = "TASK_FATAL"
+
+
 class Controller(Node):
     '''Motion과 비동기 서비스를 연결해 Component 순차 실행과 결과 발행을 관리한다.'''
     def __init__(self, motion=None):
@@ -183,13 +191,31 @@ class Controller(Node):
         # self.timer = self.create_timer(0.1, self.timer_tick)
 
 
-    def transition_to(self, next_state: State):
-        '''실패 발생 상태를 보존하고 다음 상태의 첫 진입 표시와 RUNNING 발행을 처리한다.'''
-        self.get_logger().info(
-            f"{self.state.name} -> {next_state.name}"
+    def transition_to(
+        self,
+        next_state: State,
+        category: TransitionCategory,
+        reason: str,
+    ):
+        '''분류와 사유를 기록하고 다음 상태 진입 및 RUNNING 발행을 처리한다.'''
+        previous_state = self.state
+        message = (
+            f"[STATE] {previous_state.name} -> {next_state.name} | "
+            f"category={category.value} | reason={reason}"
         )
+
+        if category == TransitionCategory.NORMAL:
+            self.get_logger().info(message)
+        elif category in {
+            TransitionCategory.RETRY,
+            TransitionCategory.COMPONENT_FATAL,
+        }:
+            self.get_logger().warning(message)
+        else:
+            self.get_logger().error(message)
+
         if next_state == State.REPORT and self.task_fatal:
-            self.failure_stage = self.state.name
+            self.failure_stage = previous_state.name
 
         self.state = next_state
         self.state_entered = True
@@ -247,7 +273,11 @@ class Controller(Node):
         self.published_component_indices = set()
 
         self.get_logger().info(f"작업 시작: {self.task_id}")
-        self.transition_to(State.LISTEN)
+        self.transition_to(
+            State.LISTEN,
+            TransitionCategory.NORMAL,
+            "새 작업 초기화 완료",
+        )
 
 
     def handle_listen(self, entered: bool):
@@ -269,7 +299,11 @@ class Controller(Node):
             self.error_code = "command_service_unavailable"
             self.detail = "/get_command 서비스 준비 시간 초과"
             self.restart_allowed = False
-            self.transition_to(State.REPORT)
+            self.transition_to(
+                State.REPORT,
+                TransitionCategory.TASK_FATAL,
+                f"명령 서비스 준비 실패: {self.error_code}, {self.detail}",
+            )
             return
 
         # 서비스 준비 여부 확인 -> 반환해서 다음 tick 대기
@@ -290,7 +324,11 @@ class Controller(Node):
             self.error_code = "command_request_failed"
             self.detail = str(error)
             self.restart_allowed = False
-            self.transition_to(State.REPORT)
+            self.transition_to(
+                State.REPORT,
+                TransitionCategory.TASK_FATAL,
+                f"명령 요청 전송 실패: {self.error_code}, {self.detail}",
+            )
             return
 
         self.request_deadline = (
@@ -331,7 +369,11 @@ class Controller(Node):
         self.get_logger().info(
             f"명령 검증 완료: Component {len(components)}개"
         )
-        self.transition_to(State.OBSERVE)
+        self.transition_to(
+            State.OBSERVE,
+            TransitionCategory.NORMAL,
+            f"명령 검증 완료, Component {len(components)}개 실행 시작",
+        )
 
 
     def handle_observe(self, entered: bool):
@@ -363,7 +405,11 @@ class Controller(Node):
                 self.task_fatal = True
                 self.error_code = "observation_move_failed"
                 self.detail = str(error)
-                self.transition_to(State.REPORT)
+                self.transition_to(
+                    State.REPORT,
+                    TransitionCategory.TASK_FATAL,
+                    f"관찰 자세 이동 실패: {self.error_code}, {self.detail}",
+                )
                 return
 
             self.pose_ready_at = (
@@ -391,7 +437,11 @@ class Controller(Node):
             self.task_fatal = True
             self.error_code = "pose_service_unavailable"
             self.detail = "/get_component_pose 서비스 준비 시간 초과"
-            self.transition_to(State.REPORT)
+            self.transition_to(
+                State.REPORT,
+                TransitionCategory.TASK_FATAL,
+                f"좌표 서비스 준비 실패: {self.error_code}, {self.detail}",
+            )
             return
 
         if not self.pose_client.service_is_ready():
@@ -404,7 +454,11 @@ class Controller(Node):
             self.task_fatal = True
             self.error_code = "pose_request_failed"
             self.detail = str(error)
-            self.transition_to(State.REPORT)
+            self.transition_to(
+                State.REPORT,
+                TransitionCategory.TASK_FATAL,
+                f"좌표 요청 전송 실패: {self.error_code}, {self.detail}",
+            )
 
 
 
@@ -452,7 +506,14 @@ class Controller(Node):
             self.task_fatal = True
             self.error_code = component.error_code
             self.detail = component.detail
-            self.transition_to(State.REPORT)
+            self.transition_to(
+                State.REPORT,
+                TransitionCategory.TASK_FATAL,
+                (
+                    f"{component.name} {stage} 실행 실패: "
+                    f"{self.error_code}, {self.detail}"
+                ),
+            )
             return
 
         now = datetime.now(timezone.utc)
@@ -471,9 +532,17 @@ class Controller(Node):
         self.component_index += 1
 
         if self.component_index < len(self.components):
-            self.transition_to(State.OBSERVE)
+            self.transition_to(
+                State.OBSERVE,
+                TransitionCategory.NORMAL,
+                f"{component.name} 배치 완료, 다음 Component 관찰 시작",
+            )
         else:
-            self.transition_to(State.INSPECT)
+            self.transition_to(
+                State.INSPECT,
+                TransitionCategory.NORMAL,
+                f"마지막 Component {component.name} 배치 완료",
+            )
 
 
     def handle_inspect(self, entered: bool):
@@ -576,7 +645,11 @@ class Controller(Node):
             return
 
         if time.monotonic() >= self.restart_ready_at:
-            self.transition_to(State.IDLE)
+            self.transition_to(
+                State.IDLE,
+                TransitionCategory.NORMAL,
+                "재시작 대기 시간 경과",
+            )
 
 
     def check_command_response(self):
@@ -622,7 +695,11 @@ class Controller(Node):
             return
 
         self.command_json = response.command_json
-        self.transition_to(State.VALIDATE)
+        self.transition_to(
+            State.VALIDATE,
+            TransitionCategory.NORMAL,
+            "명령 서비스 응답 수신 성공",
+        )
 
 
     def fail_command(
@@ -639,8 +716,11 @@ class Controller(Node):
         self.detail = detail
         self.restart_allowed = restart_allowed
 
-        self.get_logger().error(f"{error_code}: {detail}")
-        self.transition_to(State.REPORT)
+        self.transition_to(
+            State.REPORT,
+            TransitionCategory.TASK_FATAL,
+            f"명령 처리 실패: {error_code}, {detail}",
+        )
 
 
     def request_component_pose(self, robot_pose):
@@ -705,7 +785,12 @@ class Controller(Node):
             return
 
         self.target_pose = pose
-        self.transition_to(State.EXECUTE)
+        component = self.components[self.component_index]
+        self.transition_to(
+            State.EXECUTE,
+            TransitionCategory.NORMAL,
+            f"{component.name}의 유효한 목표 좌표 획득",
+        )
 
 
     def fail_pose_request(self, error_code: str, detail: str):
@@ -718,8 +803,11 @@ class Controller(Node):
         self.error_code = error_code
         self.detail = detail
 
-        self.get_logger().error(f"{error_code}: {detail}")
-        self.transition_to(State.REPORT)
+        self.transition_to(
+            State.REPORT,
+            TransitionCategory.TASK_FATAL,
+            f"좌표 요청 처리 실패: {error_code}, {detail}",
+        )
 
 
     def handle_pose_failure(self, error_code: str):
@@ -748,10 +836,15 @@ class Controller(Node):
             error_code in retryable
             and component.attempt_count < self.max_attempts
         ):
-            self.get_logger().warning(
-                f"{component.name}: {error_code}, 재관찰"
+            self.transition_to(
+                State.OBSERVE,
+                TransitionCategory.RETRY,
+                (
+                    f"{component.name} 좌표 획득 실패: {error_code}, "
+                    f"next_attempt={component.attempt_count + 1}/"
+                    f"{self.max_attempts}"
+                ),
             )
-            self.transition_to(State.OBSERVE)
             return
 
         component.status = "FAILED"
@@ -765,9 +858,26 @@ class Controller(Node):
         self.component_index += 1
 
         if self.component_index < len(self.components):
-            self.transition_to(State.OBSERVE)
+            self.transition_to(
+                State.OBSERVE,
+                TransitionCategory.COMPONENT_FATAL,
+                (
+                    f"{component.name} 좌표 획득 실패 확정: "
+                    f"error_code={component.error_code}, "
+                    f"last_error={error_code}, 다음 Component 관찰 시작"
+                ),
+            )
         else:
-            self.transition_to(State.INSPECT)
+            self.transition_to(
+                State.INSPECT,
+                TransitionCategory.COMPONENT_FATAL,
+                (
+                    f"마지막 Component {component.name} 좌표 획득 실패 확정: "
+                    f"error_code={component.error_code}, "
+                    f"last_error={error_code}, "
+                    f"attempt={component.attempt_count}/{self.max_attempts}"
+                ),
+            )
 
 
     def handle_grasp_failure(self):
@@ -794,14 +904,26 @@ class Controller(Node):
             self.error_code = component.error_code
             self.detail = component.detail
             self.restart_allowed = False
-            self.transition_to(State.REPORT)
+            self.transition_to(
+                State.REPORT,
+                TransitionCategory.TASK_FATAL,
+                (
+                    f"{component.name} 안전 복구 실패: "
+                    f"{self.error_code}, {self.detail}"
+                ),
+            )
             return
 
         if component.attempt_count < self.max_attempts:
-            self.get_logger().warning(
-                f"{component.name}: 파지 실패, 복구 완료 후 재시도"
+            self.transition_to(
+                State.OBSERVE,
+                TransitionCategory.RETRY,
+                (
+                    f"{component.name} 파지 실패 후 안전 복구 완료, "
+                    f"next_attempt={component.attempt_count + 1}/"
+                    f"{self.max_attempts}"
+                ),
             )
-            self.transition_to(State.OBSERVE)
             return
 
         component.status = "FAILED"
@@ -813,9 +935,25 @@ class Controller(Node):
         self.component_index += 1
 
         if self.component_index < len(self.components):
-            self.transition_to(State.OBSERVE)
+            self.transition_to(
+                State.OBSERVE,
+                TransitionCategory.COMPONENT_FATAL,
+                (
+                    f"{component.name} 파지 실패 확정: "
+                    f"error_code={component.error_code}, "
+                    "다음 Component 관찰 시작"
+                ),
+            )
         else:
-            self.transition_to(State.INSPECT)
+            self.transition_to(
+                State.INSPECT,
+                TransitionCategory.COMPONENT_FATAL,
+                (
+                    f"마지막 Component {component.name} 파지 실패 확정: "
+                    f"error_code={component.error_code}, "
+                    f"attempt={component.attempt_count}/{self.max_attempts}"
+                ),
+            )
 
 
     def request_inspection(self):
@@ -863,8 +1001,11 @@ class Controller(Node):
         self.error_code = error_code
         self.detail = detail
 
-        self.get_logger().error(f"{error_code}: {detail}")
-        self.transition_to(State.REPORT)
+        self.transition_to(
+            State.REPORT,
+            TransitionCategory.TASK_FATAL,
+            f"최종 검사 처리 실패: {error_code}, {detail}",
+        )
 
 
     def check_inspection_response(self):
@@ -924,7 +1065,11 @@ class Controller(Node):
         self.get_logger().info(
             f"검사 결과: {self.inspection_result['result']}"
         )
-        self.transition_to(State.REPORT)
+        self.transition_to(
+            State.REPORT,
+            TransitionCategory.NORMAL,
+            f"최종 검사 완료: {self.inspection_result['result']}",
+        )
 
 
     def publish_task_status(self, task_status="RUNNING"):
