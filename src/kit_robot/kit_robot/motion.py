@@ -177,5 +177,19 @@ class Motion:
 
         return result
 
-    def place_component(self, component_name, slot_name):
-        return 
+    def place_component(
+        self,
+        component_name: str,
+        slot_name: str,
+    ) -> None:
+        """슬롯 이름을 출력한다. 실제 슬롯 좌표는 조회하지 않는다."""
+        print(
+            f"[Motion] place_component (not implemented): {component_name}, "
+            f"slot={slot_name}"
+        )
+
+    def recover_to_safe_pose(self) -> None:
+        """그리퍼를 개방하고 홈 자세로 복귀한다."""
+        self.rg.open_gripper()
+        self.wait(2.0)
+        self.move_home()
