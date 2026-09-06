@@ -18,9 +18,9 @@ class DemoServices(Node):
     def __init__(self):
         super().__init__("controller_demo_services")
 
-        self.create_service(
-            GetCommand, "/get_command", self.get_command
-        )
+        # self.create_service(
+        #     GetCommand, "/get_command", self.get_command
+        # )
         self.create_service(
             GetComponentPose, "/get_component_pose", self.get_pose
         )
