@@ -13,8 +13,9 @@ from kit_vision.yolo_model import YoloModel
 # 검사한다 — 한 틱 유실돼도 0.3s 뒤 다음 발행이 덮어쓴다. RELIABLE 의 재전송 보장이 할 일이 없다.
 DETECTION_QOS = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, depth=1)
 
-# 목표 2~5Hz. 0.3s ~= 3.3Hz.
-PUBLISH_PERIOD_SEC = 0.3
+# 목표 2~5Hz. 0.1s = 10Hz 로 틱을 돌리되, 신선도는 틱 주기가 아니라 IMAGE_QOS depth=1 이
+# 보장한다(항상 최신 프레임). CPU 가 모자라면 이 값을 올린다 — 지연이 아니라 부하 노브다.
+PUBLISH_PERIOD_SEC = 0.1
 
 
 def mask_depth_median(depth_frame, mask):
