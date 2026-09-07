@@ -24,9 +24,6 @@ from kit_robot.controller_model import (
     build_components,
 )
 
-# 데모 실행용 의존성: 실제 운용 시 main의 주입 객체를 구현된 Motion으로 교체한다.
-from kit_robot.motion_demo import MotionDemo
-
 from kit_robot.motion import Motion
 
 class State(Enum):
