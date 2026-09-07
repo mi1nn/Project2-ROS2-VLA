@@ -1,0 +1,9 @@
+string[] expected_classes   # 기대 품목
+int32[]  expected_counts    # 기대 수량. expected_classes 와 길이 동일
+float64  max_age_sec        # 최신성 기준
+---
+bool     ok                 # 기대와 실제가 완전히 일치
+string[] missing            # 부족한 품목 (수량 부족 포함)
+string[] unexpected         # 레시피에 없는데 들어간 품목 (오투입)
+int32[]  actual_counts      # expected_classes 순서에 맞춘 실제 개수
+float64  detection_age
