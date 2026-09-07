@@ -17,15 +17,15 @@ SET item_code = EXCLUDED.item_code,
 
 INSERT INTO inventory (item_id, quantity)
 VALUES
-    (0, 2),
+    (0, 20),
     (1, 20),
-    (2, 1),
-    (3, 1),
-    (4, 1),
-    (5, 1),
-    (6, 4),
-    (7, 1),
-    (8, 1)
+    (2, 20),
+    (3, 20),
+    (4, 20),
+    (5, 20),
+    (6, 20),
+    (7, 20),
+    (8, 20)
 ON CONFLICT (item_id) DO NOTHING;
 
 SELECT setval(

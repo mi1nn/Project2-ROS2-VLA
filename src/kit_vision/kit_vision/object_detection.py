@@ -40,6 +40,7 @@ class ObjectDetectionNode(Node):
         self.model = YoloModel()
         self.publisher = self.create_publisher(DetectionArray, '/detection/objects', DETECTION_QOS)
         self.timer = self.create_timer(PUBLISH_PERIOD_SEC, self.timer_callback)
+        self._last_stamp = None
         self.get_logger().info("ObjectDetectionNode initialized.")
 
     def timer_callback(self):
@@ -51,6 +52,12 @@ class ObjectDetectionNode(Node):
         header = self.img_node.get_color_frame_header()
         if color is None or depth is None or intrinsics is None or header is None:
             return  # 카메라 아직 준비 안 됨. 이번 틱은 건너뛴다.
+
+        # 새 프레임이 아니면(카메라 드랍/정체 중) 같은 프레임을 다시 추론하지 않는다.
+        stamp = (header.stamp.sec, header.stamp.nanosec)
+        if stamp == self._last_stamp:
+            return
+        self._last_stamp = stamp
 
         objects = []
         for inst in self.model.infer(color):

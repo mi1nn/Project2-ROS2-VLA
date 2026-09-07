@@ -4,8 +4,15 @@ import os
 
 import cv2
 import numpy as np
+import torch
 from ament_index_python.packages import get_package_share_directory
 from ultralytics import YOLO
+
+# 추론 본체는 GPU로 돌리지만 전처리/NMS 등 CPU 쪽 연산도 있다. torch가 기본으로 이런
+# 연산 하나에도 호스트 논리 코어 수만큼 스레드를 다 끌어써서(실측 10~16개) realsense USB
+# 드라이버 스레드 등 다른 프로세스가 스케줄링을 못 받는 문제가 있었다. 코어 몇 개로 묶어둔다.
+# ponytail: 2는 임의값 — 부족하면 3~4로.
+torch.set_num_threads(2)
 
 PACKAGE_NAME = "kit_vision"
 PACKAGE_PATH = get_package_share_directory(PACKAGE_NAME)
@@ -52,6 +59,9 @@ def mask_centroid(mask):
 class YoloModel:
     def __init__(self):
         self.model = YOLO(_find_model_path())
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.model.to(device)
+        print(f"[kit_vision] YOLO device: {device}")
         self.class_names = _load_class_names()
 
     def infer(self, frame, conf_threshold=DEFAULT_CONF_THRESHOLD):
