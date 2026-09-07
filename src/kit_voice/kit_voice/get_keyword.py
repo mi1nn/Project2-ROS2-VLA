@@ -11,6 +11,7 @@ from openai import RateLimitError
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import PromptTemplate
 
+from kit_interfaces.msg import CommandResult
 from kit_interfaces.srv import GetCommand
 
 from kit_voice.wakeup_word import WakeupWord
@@ -53,12 +54,12 @@ def _build_prompt_template(class_names):
 
         <출력 형식>
         - 아래 JSON 하나만 출력하세요. 다른 텍스트는 절대 출력하지 마세요.
-        - {{"kit_type": "<키트 종류, 예: earthquake>", "items": [{{"name": "<품목 리스트 중 하나>", "qty": <1 이상 정수>}}]}}
+        - {{{{"kit_type": "<키트 종류, 예: earthquake>", "items": [{{{{"name": "<품목 리스트 중 하나>", "qty": <1 이상 정수>}}}}]}}}}
         - 품목 리스트에 없는 물건은 절대 포함하지 마세요.
 
         <예시>
         - 입력: "지진 키트로 컵라면 두 개랑 마스크 하나 담아줘"
-          출력: {{"kit_type": "earthquake", "items": [{{"name": "cup_ramen", "qty": 2}}, {{"name": "mask", "qty": 1}}]}}
+        출력: {{{{"kit_type": "지진대응키트", "items": [{{{{"name": "컵라면", "qty": 2}}}}, {{{{"name": "마스크", "qty": 1}}}}]}}}}
 
         <사용자 입력>
         "{{user_input}}"
@@ -111,6 +112,12 @@ class GetCommandNode(Node):
         self.stt = STT(openai_api_key=OPENAI_API_KEY)
         self.wakeup_word = WakeupWord()
 
+        self.command_result_pub = self.create_publisher(
+            CommandResult,
+            "/kit/command_result",
+            10,
+        )
+
         self.get_command_srv = self.create_service(GetCommand, "/get_command", self.get_command)
         self.get_logger().info("GetCommandNode initialized. wait for client's request...")
 
@@ -132,6 +139,7 @@ class GetCommandNode(Node):
         # GetCommand.srv). 여기서는 그대로 받아 파싱 결과에 심어 로그·DB 기록에 흘려보낸다.
         # /kit/command_result 발행자가 붙으면 message.task_id = request.task_id 로 넘긴다.
         task_id = request.task_id
+        raw_text = ""
 
         try:
             self.wakeup_word.open()
@@ -157,22 +165,37 @@ class GetCommandNode(Node):
             response.success = False
             response.command_json = ""
             response.error_code = "wakeword_timeout"
+
+            self.publish_command_result(
+                task_id,
+                response,
+                raw_text=raw_text,
+            )
+
             return response
 
         # OpenAI 호출 실패를 콜백 밖으로 흘리면 노드가 통째로 죽는다.
         # 실패는 서비스 실패로 돌려주고 노드는 살려 둔다.
         try:
             raw_text = self.stt.speech2text()
+
         except RateLimitError as e:
             response.success = False
             response.command_json = ""
             response.error_code = self._openai_error_code(e)
             return response
+
         except Exception as e:
             self.get_logger().error(f"STT 실패: {type(e).__name__}: {e}")
             response.success = False
             response.command_json = ""
             response.error_code = "stt_failed"
+
+            self.publish_command_result(
+                task_id,
+                response,
+                raw_text=raw_text,
+            )
             return response
 
         try:
@@ -203,7 +226,49 @@ class GetCommandNode(Node):
         response.success = True
         response.command_json = json.dumps(command, ensure_ascii=False)
         response.error_code = ""
+
+        self.publish_command_result(
+            task_id,
+            response,
+            raw_text=raw_text,
+        )
+
         return response
+
+    def publish_command_result(
+        self,
+        task_id,
+        response,
+        raw_text="",
+        detail="",
+    ):
+        '''서비스 처리 결과를 기존 DB 메시지 규격으로 발행한다.'''
+        message = CommandResult()
+        message.task_id = task_id
+        message.success = response.success
+        message.raw_text = raw_text
+
+        # 기존 서비스 응답은 유지하고 DB에 보낼 명령만 정리한다.
+        message.command_json = ""
+        if response.success:
+            command = json.loads(response.command_json)
+            message.command_json = json.dumps(
+                {
+                    "kit_type": command["kit_type"],
+                    "items": command["items"],
+                },
+                ensure_ascii=False,
+            )
+
+        message.validation_result = (
+            "VALID" if response.success else "INVALID"
+        )
+        message.error_code = response.error_code
+        message.detail = detail
+        message.stamp = self.get_clock().now().to_msg()
+
+        self.command_result_pub.publish(message)
+
 
 
 def _demo():

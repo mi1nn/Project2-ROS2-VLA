@@ -1,9 +1,6 @@
-from glob import glob
-import os
-
 from setuptools import find_packages, setup
 
-package_name = 'kit_vision'
+package_name = 'kit_db'
 
 setup(
     name=package_name,
@@ -13,13 +10,11 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-        (os.path.join('share', package_name, 'resource'), glob('resource/*')),
-        (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
-    maintainer='min',
-    maintainer_email='alekdi8gm30@gmail.com',
+    maintainer='shbong',
+    maintainer_email='shbong06@gmail.com',
     description='TODO: Package description',
     license='TODO: License declaration',
     extras_require={
@@ -29,8 +24,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'object_detection = kit_vision.object_detection:main',
-            'debug_view = kit_vision.debug_view:main',
+            'db_node = kit_db.db_node:main',
         ],
     },
 )

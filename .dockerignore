@@ -1,0 +1,8 @@
+.git
+build
+install
+log
+reference
+graphify-out
+docs
+*.md
