@@ -22,6 +22,7 @@ def main(args=None):
     model = YoloModel()
     next_infer_at = 0.0
     last_stamp = None
+    results = None
     try:
         while rclpy.ok():
             img_node.spin_once(timeout_sec=0.1)
@@ -30,21 +31,24 @@ def main(args=None):
             if frame is None or header is None:
                 continue
 
-            # 새 프레임이 아니면(콜백이 안 갱신했으면) 같은 프레임을 다시 추론하지 않는다.
+            # 새 프레임이 아니면(콜백이 안 갱신했으면) 같은 프레임을 다시 그리지 않는다.
             # 카메라가 멈춘/드랍 중일 때 안 그러면 오래된 프레임에 계속 YOLO를 돌려 CPU를
             # 낭비하고, 하필 그 타이밍에 USB 드라이버 스레드를 더 굶긴다.
             stamp = (header.stamp.sec, header.stamp.nanosec)
             if stamp == last_stamp:
                 continue
-
-            now = time.monotonic()
-            if now < next_infer_at:
-                continue
-            next_infer_at = now + INFER_PERIOD_SEC
             last_stamp = stamp
 
-            results = model.model(frame, verbose=False)[0]
-            cv2.imshow("kit_vision debug (q to quit)", results.plot())
+            # 추론만 스로틀하고 표시는 매 프레임(~30Hz) 한다. 화면을 추론에 묶으면 영상이
+            # 3.3Hz로 끊기고 waitKey도 같이 굶어 'q' 반응이 느려진다.
+            # 대신 박스/마스크는 최대 INFER_PERIOD_SEC 만큼 뒤쳐진다 — 디버그 뷰라 감수한다.
+            now = time.monotonic()
+            if now >= next_infer_at:
+                next_infer_at = now + INFER_PERIOD_SEC
+                results = model.model(frame, verbose=False)[0]
+
+            annotated = frame if results is None else results.plot(img=frame)
+            cv2.imshow("kit_vision debug (q to quit)", annotated)
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
     finally:
