@@ -1,11 +1,8 @@
 import os
 import yaml
-<<<<<<< HEAD
 import rclpy
 import DR_init
-=======
 import json
->>>>>>> feature/motion
 
 from ament_index_python.packages import get_package_share_directory
 from .onrobot import RG
@@ -137,11 +134,7 @@ class Motion:
         )
 
     def get_current_pose(self):
-<<<<<<< HEAD
         pose, _ = self.get_current_posx(ref=self.DR_BASE)
-=======
-        pose = self.get_current_posx(ref=self.DR_BASE)[0]
->>>>>>> feature/motion
         if pose is None:
             raise RuntimeError("Failed to get current posx")
         return list(pose)
