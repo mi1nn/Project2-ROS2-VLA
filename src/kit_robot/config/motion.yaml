@@ -19,8 +19,8 @@ motion:
       joint_acc: 60.0
 
   place:
-    linear_vel: 30.0
-    linear_acc: 60.0
+    linear_vel: 60.0
+    linear_acc: 120.0
 
     slots:
       slot_1:
