@@ -67,6 +67,7 @@ class Motion:
             from DSR_ROBOT2 import (
                 movej,
                 movel,
+                movesx,
                 wait,
                 get_current_posx,
                 posx,
@@ -92,6 +93,7 @@ class Motion:
 
         self.movej = movej
         self.movel = movel
+        self.movesx = movesx
         self.wait = wait
         self.get_current_posx = get_current_posx
         self.posx = posx
@@ -158,6 +160,52 @@ class Motion:
             raise RuntimeError(f"movel failed: result={result}, pose={pose}")
         return result
 
+    def move_arc(self, target_pose, height=100, steps=6, vel=100, acc=200):
+        start = self.get_current_pose()
+        end = list(target_pose)
+
+        if len(start) != 6 or len(end) != 6:
+            raise ValueError(
+                "start_pose and end_pose must be [x, y, z, rx, ry, rz]"
+            )
+
+        if steps < 2:
+            raise ValueError("steps must be at least 2")
+
+        if height < 0:
+            raise ValueError("height must be greater than or equal to 0")
+
+        start = [float(value) for value in start]
+        end = [float(value) for value in end]
+
+        points = []
+
+        for i in range(1, steps +1):
+            t = float(i)/steps
+
+            x = start[0] + (end[0]-start[0])*t
+            y = start[1] + (end[1]-start[1])*t 
+            z_linear = start[2] + (end[2]-start[2])*t
+            z_arc = 4.0*height*t*(1.0-t)
+            z = z_linear + z_arc
+
+            rx = start[3] + (end[3]-start[3])*t 
+            ry = start[4] + (end[4]-start[4])*t 
+            rz = start[5] + (end[5]-start[5])*t 
+
+            points.append(self.posx([x,y,z,rx,ry,rz]))
+
+        result = self.movesx(points, vel=vel, acc=acc, ref=self.DR_BASE)
+
+        if result != 0:
+            raise RuntimeError(
+            f"move_arc failed: result={result}, "
+            f"start={start}, end={end}"
+        )
+
+        return result
+
+
     def pick_component(self, component_name, target_pose, vel=80, acc=160):
         pose = list(target_pose)
         if len(pose) != 6:
@@ -213,14 +261,21 @@ class Motion:
             raise ValueError(f'Unknown place slot: {slot_name}')
         place_pose_down = list(self.place_slots[slot_name]['pos'])
 
+        place_approach = list(self.place_slots['slot_0']['pos'])
+
         if len(place_pose_down) != 6:
             raise ValueError(f"{slot_name} pose must be [x, y, z, rx, ry, rz]")
 
         place_pose_up = place_pose_down.copy()
         place_pose_up[2] += approach_height
+        
 
         vel = self.place_config['linear_vel']
         acc = self.place_config['linear_acc']
+
+        print('move to approach pose')
+
+        self.move_arc(place_approach, height=100, steps=6, vel=vel, acc=acc)
 
         print(
             f"Place component: {component_name}, "
@@ -233,7 +288,8 @@ class Motion:
         self.move_linear(place_pose_down, vel=vel, acc=acc)
         self.rg.open_gripper()
         self.wait(2.0)
-        self.move_linear(place_pose_up,vel=vel,acc=acc)
+        self.move_linear(place_pose_up, vel=vel, acc=acc)
+        self.move_linear(place_approach,vel=vel,acc=acc)
 
         print(f"Complete place: {component_name} -> {slot_name}")
 
