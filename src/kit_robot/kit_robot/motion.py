@@ -187,7 +187,7 @@ class Motion:
             self.wait(0.5)
             self.move_linear(pick_pose_down, vel=vel, acc=acc)
             self.rg.close_gripper(force_val=grip_force)
-            self.wait(2.0)
+            self.wait(5.0)
 
             gripper_width = self.rg.get_width()
 
