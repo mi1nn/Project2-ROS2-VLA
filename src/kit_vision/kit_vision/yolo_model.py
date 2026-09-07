@@ -171,6 +171,7 @@ class YoloModel:
 
             instances.append(
                 {
+                    "class_id": int(label),
                     "class_name": class_name,
                     "score": float(score),
                     "polygon": (

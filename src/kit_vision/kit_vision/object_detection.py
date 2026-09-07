@@ -1,3 +1,4 @@
+import os
 import threading
 import time
 from typing import Optional
@@ -19,6 +20,16 @@ DETECTION_QOS = QoSProfile(
     reliability=ReliabilityPolicy.BEST_EFFORT,
     depth=1,
 )
+
+# 클래스명이 한글이라 cv2.putText(FONT_HERSHEY_*)로는 못 그린다 — Hershey 폰트는
+# ASCII 글리프만 있어서 "컵라면"이 "?????"로 찍힌다. PIL + TTF 로 그린다.
+# Pillow 는 ultralytics 의존성으로 이미 깔려 있고, 폰트는 Dockerfile 의 fonts-nanum.
+FONT_PATH_CANDIDATES = (
+    "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+)
+FONT_SIZE = 16
 
 MAX_SYNC_DELTA_SEC = 0.05
 NO_FRAME_WAIT_SEC = 0.001
@@ -107,6 +118,35 @@ def polygon_depth_median(
         return None
 
     return float(np.median(valid))
+
+
+def class_color(class_id, num_classes):
+    """클래스 ID → 고정 BGR. 팔레트 테이블을 따로 관리하지 않는다.
+
+    해시로 hue 를 뽑으면 값은 고유해도 색이 뭉쳐서(9개 중 2쌍이 육안 구분 불가였다)
+    ID 를 hue 축에 균등 배분한다. 클래스가 늘어도 자동으로 다시 벌어진다.
+    """
+    hue = (class_id % max(1, num_classes)) * 180 // max(1, num_classes)
+    hsv = np.uint8([[[hue, 230, 255]]])  # OpenCV HSV 의 H 는 0~179
+    b, g, r = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)[0][0]
+    return int(b), int(g), int(r)
+
+
+def load_font():
+    """한글 TTF 를 찾아 로드한다. 없으면 None — 호출측이 ASCII 로 폴백한다."""
+    try:
+        from PIL import ImageFont
+    except ImportError:
+        return None
+
+    for path in FONT_PATH_CANDIDATES:
+        if os.path.exists(path):
+            try:
+                return ImageFont.truetype(path, FONT_SIZE)
+            except OSError:
+                continue
+
+    return None
 
 
 def pixel_to_camera(
@@ -235,6 +275,15 @@ class ObjectDetectionNode(ImgNode):
             "/detection/debug_image",
             1,
         )
+
+        self._num_classes = max(1, len(self.model.class_names))
+        self._font = load_font()
+
+        if self._font is None:
+            self.get_logger().warning(
+                "한글 TTF 를 못 찾았다 — 디버그 오버레이의 클래스명이 생략된다. "
+                "(Dockerfile 의 fonts-nanum 확인) 검출 결과 자체에는 영향 없다."
+            )
 
         self._last_processed_stamp_ns = None
         self._stop_event = threading.Event()
@@ -462,22 +511,25 @@ class ObjectDetectionNode(ImgNode):
         debug_items,
     ):
         debug = color.copy()
+        labels = []
 
+        # 도형은 OpenCV 로 그린다(빠르다). 텍스트만 뒤에서 PIL 로 한 번에 얹는다 —
+        # 객체마다 PIL 왕복하면 프레임당 변환이 N 번 일어난다.
         for inst, depth_mm in debug_items:
-            pts = np.asarray(
-                inst["polygon"],
-                dtype=np.float32,
-            ).reshape(-1, 2)
+            bgr = class_color(inst["class_id"], self._num_classes)
 
             pts_i = np.rint(
-                pts
+                np.asarray(
+                    inst["polygon"],
+                    dtype=np.float32,
+                ).reshape(-1, 2)
             ).astype(np.int32)
 
             cv2.polylines(
                 debug,
                 [pts_i],
                 isClosed=True,
-                color=(255, 255, 255),
+                color=bgr,
                 thickness=2,
             )
 
@@ -487,29 +539,21 @@ class ObjectDetectionNode(ImgNode):
                 debug,
                 (int(cx), int(cy)),
                 4,
-                (255, 255, 255),
+                bgr,
                 -1,
             )
 
-            label = (
-                f'{inst["class_name"]} '
-                f'{inst["score"]:.2f} '
-                f'{depth_mm:.0f}mm'
+            labels.append(
+                (
+                    f'{inst["class_name"]} '
+                    f'{inst["score"]:.2f} '
+                    f'{depth_mm:.0f}mm',
+                    (int(cx) + 6, int(cy) - FONT_SIZE - 4),
+                    bgr,
+                )
             )
 
-            cv2.putText(
-                debug,
-                label,
-                (
-                    int(cx) + 6,
-                    int(cy) - 6,
-                ),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (255, 255, 255),
-                1,
-                cv2.LINE_AA,
-            )
+        self._draw_labels(debug, labels)
 
         debug_msg = self.bridge.cv2_to_imgmsg(
             debug,
@@ -521,6 +565,58 @@ class ObjectDetectionNode(ImgNode):
         self.debug_publisher.publish(
             debug_msg
         )
+
+    def _draw_labels(self, image, labels):
+        """한글 라벨을 이미지에 얹는다. 폰트가 없으면 ASCII 부분만 OpenCV 로 그린다."""
+        if not labels:
+            return
+
+        # 프레임 가장자리 물체는 라벨 기준점이 밖으로 나가 통째로 안 보인다. 안으로 당긴다.
+        h, w = image.shape[:2]
+        labels = [
+            (text, (min(max(0, x), w - 1), min(max(0, y), h - FONT_SIZE - 1)), bgr)
+            for text, (x, y), bgr in labels
+        ]
+
+        if self._font is not None:
+            from PIL import Image as PILImage
+            from PIL import ImageDraw
+
+            pil = PILImage.fromarray(
+                cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            )
+            draw = ImageDraw.Draw(pil)
+
+            for text, (x, y), (b, g, r) in labels:
+                draw.text(
+                    (x, y),
+                    text,
+                    font=self._font,
+                    fill=(r, g, b),  # PIL 은 RGB
+                    stroke_width=2,
+                    stroke_fill=(0, 0, 0),  # 밝은 배경에서도 읽히게
+                )
+
+            # PIL 결과를 원본 배열에 그대로 덮어쓴다(호출측이 이 배열을 발행한다).
+            image[:] = cv2.cvtColor(
+                np.asarray(pil),
+                cv2.COLOR_RGB2BGR,
+            )
+            return
+
+        # 폴백: 한글 글리프가 없으므로 클래스명은 색으로만 구분하고 수치만 적는다.
+        for text, (x, y), bgr in labels:
+            ascii_only = text.encode("ascii", "ignore").decode().strip()
+            cv2.putText(
+                image,
+                ascii_only,
+                (x, y + FONT_SIZE),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                bgr,
+                1,
+                cv2.LINE_AA,
+            )
 
     def destroy_node(self):
         self._stop_event.set()

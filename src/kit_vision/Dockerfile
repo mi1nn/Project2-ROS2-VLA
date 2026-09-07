@@ -4,6 +4,8 @@
 # GPU 추론: compose.yaml에서 --gpus 로 nvidia 런타임을 넘겨받는다 (host: nvidia-container-toolkit 설치됨).
 FROM ros:jazzy-ros-base
 
+# fonts-nanum: class_names.json 이 한글이라 디버그 오버레이에 TTF 가 필요하다.
+# cv2.putText 의 Hershey 폰트는 ASCII 전용이라 한글이 "?"로 찍힌다.
 # rmw-cyclonedds-cpp: 호스트 realsense2_camera 가 Cyclone 으로 돈다(docs/07-test-scenario.md).
 # 기본값 rmw_fastrtps_cpp 로 두면 벤더가 달라 921KB 짜리 이미지 토픽이 제대로 안 넘어온다.
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -13,6 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ros-jazzy-rosidl-default-generators \
         ros-jazzy-launch-ros \
         ros-jazzy-rmw-cyclonedds-cpp \
+        fonts-nanum \
     && rm -rf /var/lib/apt/lists/*
 
 # Ubuntu 24.04(Noble) 이미지는 PEP 668 externally-managed 환경이라 시스템 pip 설치엔
