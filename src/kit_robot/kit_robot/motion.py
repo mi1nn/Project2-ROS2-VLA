@@ -1,7 +1,11 @@
 import os
 import yaml
+<<<<<<< HEAD
 import rclpy
 import DR_init
+=======
+import json
+>>>>>>> feature/motion
 
 from ament_index_python.packages import get_package_share_directory
 from .onrobot import RG
@@ -18,11 +22,19 @@ def _set_dr_init(node):
     DR_init.__dsr__node = node
 
 
+import DR_init
+ROBOT_ID = "dsr01"
+ROBOT_MODEL = "m0609"
+
 class Motion:
     def __init__(self, node):
 
         if node is None:
             raise ValueError("ROS 2 node is required for DSR initialization.")
+
+        DR_init.__dsr__id = ROBOT_ID
+        DR_init.__dsr__model = ROBOT_MODEL
+        DR_init.__dsr__node = node
 
         config_path = os.path.join(
             get_package_share_directory("kit_robot"), "config", "motion.yaml"
@@ -32,6 +44,17 @@ class Motion:
             config = yaml.safe_load(file)["motion"]
 
         self.positions = config["positions"]
+        self.place_config = config['place']
+        self.place_slots = self.place_config['slots']
+
+        grasp_params_path = os.path.join(
+            get_package_share_directory('kit_robot'),
+            'resource',
+            'grasp_params.json',
+            )
+
+        with open(grasp_params_path, 'r', encoding='utf-8') as file:
+            self.grasp_params = json.load(file)
 
         # DSR_ROBOT2는 서비스 이름을 자기 노드 네임스페이스 기준 상대경로로 연다
         # (예: "dsr_controller2/motion/move_joint").  robot_id는 서비스 이름에
@@ -114,7 +137,11 @@ class Motion:
         )
 
     def get_current_pose(self):
+<<<<<<< HEAD
         pose, _ = self.get_current_posx(ref=self.DR_BASE)
+=======
+        pose = self.get_current_posx(ref=self.DR_BASE)[0]
+>>>>>>> feature/motion
         if pose is None:
             raise RuntimeError("Failed to get current posx")
         return list(pose)
@@ -130,23 +157,35 @@ class Motion:
             raise RuntimeError(f"movel failed: result={result}, pose={pose}")
         return result
 
-    def pick_component(self, target_pose, vel=100, acc=200, approach_height=100):
+    def pick_component(self, component_name, target_pose, vel=100, acc=200):
         pose = list(target_pose)
         if len(pose) != 6:
             raise ValueError("target_pose must be [x, y, z, rx, ry, rz]")
 
-        result = 0
+        params = self.grasp_params.get(component_name, self.grasp_params['_default'])
+        open_width = params['width']
+        grip_force = params['force']
+        approach_height = params['approach']
+
+        result = False
         pick_pose_down = pose.copy()
         pick_pose_up = pose.copy()
         pick_pose_up[2] += approach_height
 
+        print(
+            f"Pick component: {component_name}, "
+            f"width={open_width}, "
+            f"force={grip_force}, "
+            f"approach={approach_height}"
+        )
+
         for i in range(5):
-            self.rg.open_gripper()
+            self.rg.move_gripper(open_width, force_val=grip_force)
             self.wait(2.0)
             self.move_linear(pick_pose_up, vel=vel, acc=acc)
             self.wait(0.5)
             self.move_linear(pick_pose_down, vel=vel, acc=acc)
-            self.rg.close_gripper()
+            self.rg.close_gripper(force_val=grip_force)
             self.wait(2.0)
 
             gripper_width = self.rg.get_width()
@@ -156,7 +195,7 @@ class Motion:
 
             if gripper_width > 13:
                 print('Success to grip object')
-                result = 1
+                result = True
                 break
             else:
                 print(f'{i+1} try, Failed to grip object')
@@ -164,14 +203,10 @@ class Motion:
 
             if i == 4:
                 print('Failed to grip object in all try')
-                result = -1
+                result = False
 
         return result
 
-    '''
-    미구현 부분
-    중간 점검을 위해 log만 송출
-    '''
     def place_component(
         self,
         component_name: str,
@@ -179,11 +214,12 @@ class Motion:
     ) -> None:
         """슬롯 이름을 출력한다. 실제 슬롯 좌표는 조회하지 않는다."""
         print(
-            f"[MotionDemo] place_component: {component_name}, "
+            f"[Motion] place_component (not implemented): {component_name}, "
             f"slot={slot_name}"
         )
 
     def recover_to_safe_pose(self) -> None:
-        """그리퍼 개방과 안전 복귀가 완료된 것으로 처리한다."""
-        self._current_pose = [0.0] * 6
-        print("[MotionDemo] recover_to_safe_pose: 개방 및 안전 복귀")
+        """그리퍼를 개방하고 홈 자세로 복귀한다."""
+        self.rg.open_gripper()
+        self.wait(2.0)
+        self.move_home()
