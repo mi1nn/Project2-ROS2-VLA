@@ -25,6 +25,7 @@ setup(
     entry_points={
         'console_scripts': [
             'db_node = kit_db.db_node:main',
+            'mock_publisher=kit_db.mock_publisher:main',
         ],
     },
 )
