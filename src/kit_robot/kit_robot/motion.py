@@ -158,7 +158,7 @@ class Motion:
             raise RuntimeError(f"movel failed: result={result}, pose={pose}")
         return result
 
-    def pick_component(self, component_name, target_pose, vel=100, acc=200):
+    def pick_component(self, component_name, target_pose, vel=80, acc=160):
         pose = list(target_pose)
         if len(pose) != 6:
             raise ValueError("target_pose must be [x, y, z, rx, ry, rz]")
