@@ -1,0 +1,342 @@
+# DB 테이블/Collection 구조
+
+관련 이슈·To-do: DB 저장 대상과 테이블 관리 범위 구체화 (https://app.notion.com/p/DB-3ce0f4c1b9cc80c7a51ce2ee252ecc6b?pvs=21)
+기록일: 2026년 9월 3일
+담당자: 봉승현
+마지막 수정: 2026년 9월 3일 오후 5:27
+분류: 구현
+분야: Backend, DB, ROS2
+생성일: 2026년 9월 3일 오후 4:09
+작성 상태: 작성 중
+
+## 전체 저장 구조
+
+### MongoDB : 실행, 결과 추적
+
+다음 3개의 Collection으로 구성한다.
+
+- commands
+- kit_executions
+- component_executions
+
+성능 지표 계산을 하기 위한 최소한의 데이터만 관리할 수 있도록 구성했다. 추후 필요에 따라 task_events, logs, attempts 등을 확장할 수 있다.
+
+### PostgreSQL : 품목, 현재 재고 관리
+
+다음 2개의 table만 사용한다.
+
+- item
+- inventory
+
+MongoDB의 class_name과 PostgreSQL의 item_code를 동일한 값으로 맞추어 두 DB를 관리함에 있어 혼동을 방지한다.
+
+## ID 체계
+
+기준이 되는 ID는 `task_id`로 통일한다.
+
+별도의 `component_execution_id` 와 같은 ID를 만들지 않는다.
+
+| 대상 | 식별 방식 |
+| --- | --- |
+| 음성 명령 | `task_id` |
+| Kit 실행 | `task_id` |
+| Component 실행 | `task_id + component_index` |
+| 재시도 | `task_id + component_index + attempt_no` |
+
+동일한 `task_id` 아래에 component가 생기고, 그 아래에 attempt가 쌓이는 구조이다. (아래 예시 참조)
+
+```
+task_id = TASK-20260903-001
+
+Component 0
+└── attempt 1
+└── attempt 2
+
+Component 1
+└── attempt 1
+```
+
+## 재시도 저장 방식
+
+그리퍼가 파지에 실패했을 때, 진행하는 재시도에 대한 저장 방식은 다음과 같이 관리한다.
+
+별도의 문서로 만들지 않고, `component_executions` 문서 내부에 `attempts` 배열에 저장한다.
+
+```json
+{
+  "task_id": "TASK-20260903-001",
+  "component_index": 0,
+  "class_name": "cup_ramen",
+  "status": "SUCCESS",
+  "attempt_count": 2,
+
+  "attempts": [
+    {
+      "attempt_no": 1,
+      "status": "FAILED",
+      "detection": {
+        "score": 0.82,
+        "camera_xyz": [31.2, -22.4, 518.0],
+        "centroid_px": [314, 228],
+        "detection_age": 0.21
+      },
+      "target_pose": [
+        421.1,
+        -125.2,
+        91.3,
+        0.0,
+        180.0,
+        0.0
+      ],
+      "grasp": {
+        "result": "FAILED",
+        "measured_width": 0.0
+      },
+      "failure_code": "empty_grasp",
+      "started_at": "...",
+      "ended_at": "..."
+    },
+    {
+      "attempt_no": 2,
+      "status": "SUCCESS",
+      "detection": {
+        "score": 0.91,
+        "camera_xyz": [33.8, -20.1, 515.0],
+        "centroid_px": [318, 226],
+        "detection_age": 0.18
+      },
+      "target_pose": [
+        423.5,
+        -122.9,
+        89.1,
+        0.0,
+        180.0,
+        0.0
+      ],
+      "grasp": {
+        "result": "SUCCESS",
+        "measured_width": 37.4
+      },
+      "release": {
+        "result": "SUCCESS",
+        "slot": "slot_1"
+      },
+      "failure_code": null,
+      "started_at": "...",
+      "ended_at": "..."
+    }
+  ]
+}
+```
+
+---
+
+# MongoDB Collection
+
+### `commands`
+
+음성 LLM, 명령 검증 평가용
+
+case1) 정확한 명령 + 검증 성공
+
+```json
+{
+  "task_id": "TASK-20260903-001",
+  "raw_text": "지진 키트로 컵라면 두 개와 마스크 하나 담아줘",
+  "command_json": {
+    "kit_type": "earthquake",
+    "items": [
+      {
+        "name": "cup_ramen",
+        "qty": 2
+      },
+      {
+        "name": "mask",
+        "qty": 1
+      }
+    ]
+  },
+  "validation": {
+    "result": "VALID",
+    "error_code": null,
+    "detail": null
+  },
+  "created_at": "..."
+}
+```
+
+case2) 명령 검증 실패
+
+```json
+{
+  "task_id": "TASK-20260903-002",
+  "raw_text": "없는 물건을 넣어줘",
+  "command_json": null,
+  "validation": {
+    "result": "INVALID",
+    "error_code": "unsupported_item",
+    "detail": "지원하지 않는 품목"
+  }
+}
+```
+
+실패한 경우에는 `kit_executions`는 생성되지 않는다.
+
+### `kit_executions`
+
+전체 kit 단위의 실행 상태와 최종 검사 결과를 저장한다.
+
+case1) 진행 중
+
+```json
+{
+  "task_id": "TASK-20260903-001",
+  "kit_type": "earthquake",
+  "status": "RUNNING",
+  "current_state": "EXECUTE",
+
+  "requested_items": [
+    {
+      "name": "cup_ramen",
+      "qty": 2
+    },
+    {
+      "name": "mask",
+      "qty": 1
+    }
+  ],
+
+  "component_summary": {
+    "total": 3,
+    "success": 1,
+    "failed": 0,
+    "skipped": 0
+  },
+
+  "final_inspection": null,
+
+  "status_history": [
+    {
+      "state": "VALIDATE",
+      "timestamp": "..."
+    },
+    {
+      "state": "OBSERVE",
+      "timestamp": "..."
+    },
+    {
+      "state": "EXECUTE",
+      "timestamp": "..."
+    }
+  ],
+
+  "started_at": "...",
+  "ended_at": null
+}
+```
+
+case2) 최종 검사가 완료되면 다음처럼 업데이트 한다.
+
+```json
+{
+  "status": "SUCCESS",
+  "current_state": "REPORT",
+  "final_inspection": {
+    "result": "PASS",
+    "expected_counts": {
+      "cup_ramen": 2,
+      "mask": 1
+    },
+    "actual_counts": {
+      "cup_ramen": 2,
+      "mask": 1
+    },
+    "missing": [],
+    "unexpected": [],
+    "detection_age": 0.15,
+    "inspected_at": "..."
+  },
+  "ended_at": "..."
+}
+```
+
+### `component_executions`
+
+Component 하나의 전체 실행과 재시도를 저장한다.
+
+```json
+{
+  "task_id": "TASK-20260903-001",
+  "component_index": 0,
+  "component_total": 3,
+  "class_name": "cup_ramen",
+  "slot": "slot_1",
+  "status": "SUCCESS",
+  "attempt_count": 2,
+  "attempts": [],
+  "started_at": "...",
+  "ended_at": "..."
+}
+```
+
+---
+
+## Controller 상태 관리
+
+### state : 현재 Controller 작업 단계
+
+- LISTEN
+- VALIDATE
+- OBSERVE
+- EXECUTE
+- INSPECT
+- REPORT
+
+### status : 실행 결과
+
+Kit
+
+- RUNNING
+- SUCCESS
+- FAILED
+
+Component
+
+- PENDING
+- RUNNING
+- SUCCESS
+- FAILED
+- SKIPPED
+
+Attempt
+
+- RUNNING
+- SUCCESS
+- FAILED
+
+---
+
+# PostgreSQL 테이블 구조
+
+#### `item`
+
+Voice, Vision, Controller, DB가 공통으로 사용하는 품목 코드를 관리
+
+| 항목 | 타입 | 비고 |
+| --- | --- | --- |
+| item_id | bigint | PK |
+| item_code | varchar | NOT NULL, UNIQUE
+vision의 class_name
+componentResult의 component
+와 동일한 값이어야 한다. |
+| item_name | varchar | NOT NULL |
+
+#### `inventory`
+
+| 항목 | 타입 | 비고 |
+| --- | --- | --- |
+| item_id | bigint | PK/FK |
+| quantity | integer | 기본값 0 |
+| updated_at | timestamptz | 기본값 현재 시각 |
+
+수량 차감은 DB 노드에서 관리한다.
