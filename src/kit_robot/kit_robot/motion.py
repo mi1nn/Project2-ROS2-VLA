@@ -109,7 +109,11 @@ class Motion:
         else:
             raise TypeError("home position must be 'joint'")
 
-        return self.movej(home_pos, vel=config["joint_vel"], acc=config["joint_acc"])
+        result = self.movej(home_pos, vel=config["joint_vel"], acc=config["joint_acc"])
+        if result != 0:
+            raise RuntimeError(f"move_home failed: result={result}")
+
+        return result
 
     def move_to_observation_pose(self):
         config = self.positions["observation_pose"]
@@ -118,9 +122,11 @@ class Motion:
         else:
             raise TypeError("observation_pose must be 'joint'")
 
-        return self.movej(
-            pick_camera_pos, vel=config["joint_vel"], acc=config["joint_acc"]
-        )
+        result = self.movej(pick_camera_pos, vel=config["joint_vel"], acc=config["joint_acc"])
+        if result != 0:
+            raise RuntimeError(f'move_to_observation_pose failed: result={result}')
+
+        return result
 
     def move_to_inspection_pose(self):
         config = self.positions["inspection_pose"]
@@ -129,9 +135,11 @@ class Motion:
         else:
             raise TypeError("inspection_pose must be 'joint'")
 
-        return self.movej(
-            place_camera_pos, vel=config["joint_vel"], acc=config["joint_acc"]
-        )
+        result = self.movej(place_camera_pos, vel=config["joint_vel"], acc=config["joint_acc"])
+        if result != 0:
+            raise RuntimeError(f'move_to_inspection_pose failed: result={result}')
+
+        return result
 
     def get_current_pose(self):
         pose, _ = self.get_current_posx(ref=self.DR_BASE)
@@ -200,19 +208,42 @@ class Motion:
 
         return result
 
-    def place_component(
-        self,
-        component_name: str,
-        slot_name: str,
-    ) -> None:
-        """슬롯 이름을 출력한다. 실제 슬롯 좌표는 조회하지 않는다."""
+    def place_component(self, component_name, slot_name, approach_height=100):
+        if slot_name not in self.place_slots:
+            raise ValueError(f'Unknown place slot: {slot_name}')
+        place_pose_down = list(self.place_slots[slot_name]['pos'])
+
+        if len(place_pose_down) != 6:
+            raise ValueError(f"{slot_name} pose must be [x, y, z, rx, ry, rz]")
+
+        place_pose_up = place_pose_down.copy()
+        place_pose_up[2] += approach_height
+
+        vel = self.place_config['linear_vel']
+        acc = self.place_config['linear_acc']
+
         print(
-            f"[Motion] place_component (not implemented): {component_name}, "
-            f"slot={slot_name}"
+            f"Place component: {component_name}, "
+            f"slot={slot_name}, "
+            f"pose={place_pose_down}"
         )
 
-    def recover_to_safe_pose(self) -> None:
-        """그리퍼를 개방하고 홈 자세로 복귀한다."""
+        self.move_linear(place_pose_up, vel=vel, acc=acc)
+        self.wait(0.5)
+        self.move_linear(place_pose_down, vel=vel, acc=acc)
         self.rg.open_gripper()
         self.wait(2.0)
-        self.move_home()
+        self.move_linear(place_pose_up,vel=vel,acc=acc)
+
+        print(f"Complete place: {component_name} -> {slot_name}")
+
+    def recover_to_safe_pose(self):
+        print("Recovering to safe pose")
+        self.rg.open_gripper()
+        self.wait(2.0)
+        result = self.move_home()
+
+        if result != 0:
+            raise RuntimeError(f"Failed to recover home: result={result}")
+
+        print("Complete recovery to safe pose")
