@@ -6,11 +6,16 @@ from cv_bridge import CvBridge
 
 # RealSense 드라이버는 이미지 토픽을 BEST_EFFORT 로 발행한다. RELIABLE 로 구독하면
 # QoS 불일치로 콜백이 아예 안 불릴 수 있다 (reference/subscriber_sourcecode/subscriber_img.py).
+# depth=1: eye-in-hand 라 의미 있는 건 언제나 "지금" 프레임뿐이다. 큐를 쌓아두면
+# 팔이 움직인 뒤에 이동 전 프레임을 꺼내 쓰게 되고 그건 통째로 틀린 좌표다.
 IMAGE_QOS = QoSProfile(
     reliability=ReliabilityPolicy.BEST_EFFORT,
     durability=DurabilityPolicy.VOLATILE,
-    depth=10,
+    depth=1,
 )
+
+# 구독 3개(color/depth/camera_info) × depth=1 → 한 번에 대기할 수 있는 콜백 수의 상한.
+_DRAIN_LIMIT = 6
 
 
 class ImgNode(Node):
@@ -32,7 +37,14 @@ class ImgNode(Node):
         self._img_exec.add_node(self)
 
     def spin_once(self, timeout_sec=0.1):
+        """대기 중인 이미지 콜백을 전부 비운다.
+
+        Executor.spin_once 는 콜백을 하나만 처리한다. 구독이 3개라 그대로 쓰면
+        color 갱신률이 호출률의 1/3 로 떨어지고 나머지는 큐에 밀린다.
+        """
         self._img_exec.spin_once(timeout_sec=timeout_sec)
+        for _ in range(_DRAIN_LIMIT):
+            self._img_exec.spin_once(timeout_sec=0.0)
 
     def camera_info_callback(self, msg):
         self.intrinsics = {"fx": msg.k[0], "fy": msg.k[4], "ppx": msg.k[2], "ppy": msg.k[5]}
