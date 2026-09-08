@@ -680,10 +680,11 @@ class Motion:
 
             self.rg.close_gripper(force_val=grip_force)
             time.sleep(5.0)
-            gripper_width = self.rg.get_width()
 
             self.move_linear(pick_pose_up, vel=vel, acc=acc, avoid_collisions=False)
             self.logger.info(f"gripper_width={gripper_width}")
+
+            gripper_width = self.rg.get_status()
 
             if gripper_width > 13:
                 self.logger.info("Successfully gripped object")
