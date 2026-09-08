@@ -65,7 +65,7 @@ ros2 run kit_voice get_command
 ```bash
 ros2 run kit_robot controller --ros-args \
 --params-file src/kit_robot/resource/controller.yaml \
--p restart_delay_sec:=60.0
+-p restart_delay_sec:=10.0
 ```
 
 
