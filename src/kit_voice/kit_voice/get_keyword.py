@@ -40,8 +40,16 @@ def _load_class_names():
 
 
 def _build_prompt_template(class_names):
+    """LLM 명령 추출용 프롬프트를 만든다.
+
+    JSON 예시의 중괄호와 LangChain 변수 중괄호가 충돌하지 않도록
+    PromptTemplate은 Jinja2 형식을 사용한다.
+    """
     names = ", ".join(class_names)
-    content = f"""
+
+    # Python f-string을 사용하지 않는다.
+    # JSON의 { }는 그대로 두고, 입력 변수만 Jinja2의 {{ user_input }}로 표시한다.
+    content = """
         당신은 재난 구조키트 조립 명령에서 품목과 수량을 추출해야 합니다.
 
         <목표>
@@ -50,22 +58,28 @@ def _build_prompt_template(class_names):
         - 어떤 재난 대비 키트인지(kit_type)도 문맥에서 유추하세요. 모르면 "unknown".
 
         <품목 리스트>
-        {names}
+        __CLASS_NAMES__
 
         <출력 형식>
         - 아래 JSON 하나만 출력하세요. 다른 텍스트는 절대 출력하지 마세요.
-        - {{{{"kit_type": "<키트 종류, 예: earthquake>", "items": [{{{{"name": "<품목 리스트 중 하나>", "qty": <1 이상 정수>}}}}]}}}}
+        - {"kit_type": "<키트 종류, 예: earthquake>", "items": [{"name": "<품목 리스트 중 하나>", "qty": <1 이상 정수>}]}
         - 품목 리스트에 없는 물건은 절대 포함하지 마세요.
 
         <예시>
         - 입력: "지진 키트로 컵라면 두 개랑 마스크 하나 담아줘"
-        출력: {{{{"kit_type": "지진대응키트", "items": [{{{{"name": "컵라면", "qty": 2}}}}, {{{{"name": "마스크", "qty": 1}}}}]}}}}
+        출력: {"kit_type": "지진대응키트", "items": [{"name": "컵라면", "qty": 2}, {"name": "마스크", "qty": 1}]}
 
         <사용자 입력>
-        "{{user_input}}"
+        "{{ user_input }}"
     """
-    return PromptTemplate(input_variables=["user_input"], template=content)
 
+    content = content.replace("__CLASS_NAMES__", names)
+
+    return PromptTemplate(
+        input_variables=["user_input"],
+        template=content,
+        template_format="jinja2",
+    )
 
 def parse_and_validate(raw_response, class_names):
     """LLM 응답(JSON 텍스트)을 파싱하고 품목·수량을 검증한다 (02-interfaces.md §3.1 계약).
