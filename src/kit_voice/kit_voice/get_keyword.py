@@ -32,6 +32,10 @@ CLASS_NAMES_PATH = os.path.join(
     get_package_share_directory("kit_vision"), "resource", "class_names.json"
 )
 
+# 키트명 → {품목명: 수량} 정의. "kit_type → 레시피 자동 조회" (02-interfaces.md 열린 이슈)를
+# 이 파일 + 프롬프트 확장으로 해결한다. 실제 키트 구성은 여기서 고친다.
+KIT_RECIPES_PATH = os.path.join(RESOURCE_PATH, "kit_recipes.json")
+
 
 def _load_class_names():
     with open(CLASS_NAMES_PATH, "r", encoding="utf-8") as f:
@@ -39,18 +43,38 @@ def _load_class_names():
     return sorted(set(raw.values()))
 
 
-def _build_prompt_template(class_names):
+def _load_kit_recipes():
+    with open(KIT_RECIPES_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _format_kit_recipes(kit_recipes):
+    lines = []
+    for kit_name, items in kit_recipes.items():
+        parts = ", ".join(f"{name} {qty}개" for name, qty in items.items())
+        lines.append(f"- {kit_name}: {parts}")
+    return "\n        ".join(lines)
+
+
+def _build_prompt_template(class_names, kit_recipes):
     names = ", ".join(class_names)
+    kits = _format_kit_recipes(kit_recipes)
     content = f"""
         당신은 재난 구조키트 조립 명령에서 품목과 수량을 추출해야 합니다.
 
         <목표>
         - 문장에서 아래 품목 리스트에 있는 것만 최대한 정확히 추출하세요.
         - 각 품목의 수량도 함께 추출하세요. 수량 언급이 없으면 1로 간주합니다.
+        - 사용자가 아래 <키트 정의>의 특정 키트를 지칭하면(예: "키트1번"), 그 키트에 속한 품목들로
+          items를 채우세요. kit_type에는 지칭한 키트 이름을 그대로 넣으세요. 개별 품목을 직접
+          말하면 기존처럼 그 품목만 채우세요.
         - 어떤 재난 대비 키트인지(kit_type)도 문맥에서 유추하세요. 모르면 "unknown".
 
         <품목 리스트>
         {names}
+
+        <키트 정의>
+        {kits}
 
         <출력 형식>
         - 아래 JSON 하나만 출력하세요. 다른 텍스트는 절대 출력하지 마세요.
@@ -60,6 +84,8 @@ def _build_prompt_template(class_names):
         <예시>
         - 입력: "지진 키트로 컵라면 두 개랑 마스크 하나 담아줘"
         출력: {{{{"kit_type": "지진대응키트", "items": [{{{{"name": "컵라면", "qty": 2}}}}, {{{{"name": "마스크", "qty": 1}}}}]}}}}
+        - 입력: "키트1번 집어줘"
+        출력: {{{{"kit_type": "키트1번", "items": [{{{{"name": "컵라면", "qty": 1}}}}, {{{{"name": "샴푸리필", "qty": 1}}}}, {{{{"name": "양갱", "qty": 1}}}}]}}}}
 
         <사용자 입력>
         "{{user_input}}"
@@ -106,8 +132,9 @@ class GetCommandNode(Node):
         super().__init__("get_command_node")
 
         self.class_names = _load_class_names()
+        self.kit_recipes = _load_kit_recipes()
         self.llm = ChatOpenAI(model="gpt-4o", temperature=0.3, openai_api_key=OPENAI_API_KEY)
-        self.prompt_template = _build_prompt_template(self.class_names)
+        self.prompt_template = _build_prompt_template(self.class_names, self.kit_recipes)
         self.lang_chain = self.prompt_template | self.llm
         self.stt = STT(openai_api_key=OPENAI_API_KEY)
         self.wakeup_word = WakeupWord()
@@ -274,6 +301,13 @@ class GetCommandNode(Node):
 def _demo():
     # OpenAI/마이크 없이도 도는 순수 파싱·검증 self-check.
     class_names = {"cup_ramen", "mask"}
+
+    # 키트 정의가 프롬프트에 실제로 심기는지 확인 (LLM 호출 없이 텍스트 조립만 검증).
+    kit_recipes = {"키트1번": {"cup_ramen": 1, "mask": 2}}
+    prompt = _build_prompt_template(class_names, kit_recipes)
+    assert "키트1번" in prompt.template
+    assert "cup_ramen 1개" in prompt.template
+    assert "mask 2개" in prompt.template
 
     ok = parse_and_validate(
         '{"kit_type": "earthquake", "items": '
