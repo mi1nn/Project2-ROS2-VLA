@@ -238,6 +238,7 @@ class Motion:
             self.wait(5.0)
             
             self.move_linear(pick_pose_up, vel=vel, acc=acc)
+            self.wait(1.0)
 
             gripper_status = self.rg.get_status()
             grip_detected = bool(gripper_status[1])
