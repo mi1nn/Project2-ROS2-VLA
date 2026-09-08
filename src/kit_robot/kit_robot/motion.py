@@ -686,7 +686,10 @@ class Motion:
 
             gripper_width = self.rg.get_status()
 
-            if gripper_width > 13:
+            gripper_status = self.rg.get_status()
+            grip_detected = bool(gripper_status[1])
+
+            if grip_detected:
                 self.logger.info("Successfully gripped object")
                 return True
 
@@ -820,8 +823,8 @@ class Motion:
             f"Complete place: {component_name} -> {slot_name}"
         )
 
-        def recover_to_safe_pose(self):
-            self.logger.warning("Recovering to safe pose")
+    def recover_to_safe_pose(self):
+        self.logger.warning("Recovering to safe pose")
         self.rg.open_gripper()
         time.sleep(2.0)
         result = self.move_home()
