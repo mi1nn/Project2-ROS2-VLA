@@ -236,19 +236,19 @@ class Motion:
             self.move_linear(pick_pose_down, vel=vel, acc=acc)
             self.rg.close_gripper(force_val=grip_force)
             self.wait(5.0)
-
-            gripper_width = self.rg.get_width()
-
+            
             self.move_linear(pick_pose_up, vel=vel, acc=acc)
-            print(f'gripper_width: {gripper_width}')
 
-            if gripper_width > 13:
-                print('Success to grip object')
+            gripper_status = self.rg.get_status()
+            grip_detected = bool(gripper_status[1])
+            
+
+            if grip_detected:
+                print("Success to grip object")
                 result = True
                 break
             else:
-                print(f'{i+1} try, Failed to grip object')
-                
+                print(f"{i + 1} try, Failed to grip object")
 
             if i == 4:
                 print('Failed to grip object in all try')
@@ -275,7 +275,7 @@ class Motion:
 
         print('move to approach pose')
 
-        self.move_arc(place_approach, height=100, steps=6, vel=vel, acc=acc)
+        self.move_arc(place_approach, height=50, steps=6, vel=vel, acc=acc)
 
         print(
             f"Place component: {component_name}, "
