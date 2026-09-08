@@ -10,7 +10,14 @@ import yaml
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import Pose
 from moveit_msgs.action import ExecuteTrajectory, MoveGroup
-from moveit_msgs.msg import Constraints, JointConstraint, MoveItErrorCodes
+from moveit_msgs.msg import (
+    Constraints,
+    JointConstraint,
+    MoveItErrorCodes,
+    OrientationConstraint,
+    PositionConstraint,
+)
+from shape_msgs.msg import SolidPrimitive
 from moveit_msgs.srv import GetCartesianPath
 from rclpy.action import ActionClient
 from rclpy.duration import Duration
@@ -76,7 +83,7 @@ class Motion:
             raise ValueError("moveit.joint_names must contain exactly 6 joints.")
 
         self.move_group_action_name = self.moveit_config.get(
-            "move_group_action", "/move_action"
+            "move_group_action", "/dsr01/move_action"
         )
         self.execute_action_name = self.moveit_config.get(
             "execute_trajectory_action", "/execute_trajectory"
@@ -399,10 +406,158 @@ class Motion:
         ]
 
     # ------------------------------------------------------------------
+    # MoveIt pose-goal planning
+    # ------------------------------------------------------------------
+
+    def move_pose(
+        self,
+        target_pose,
+        velocity_scale=None,
+        acceleration_scale=None,
+        position_tolerance_mm=2.0,
+        orientation_tolerance_deg=2.0,
+    ):
+        """Plan/execute a free-space MoveIt pose goal for ``eef_link``.
+
+        Unlike move_linear(), this does not force a Cartesian straight line.
+        OMPL/MoveGroup is free to choose a collision-aware joint-space path
+        that reaches the requested Cartesian pose.
+
+        External pose convention:
+            [x_mm, y_mm, z_mm, rx_deg, ry_deg, rz_deg]
+        where orientation is ZYZ Euler in ``base_frame``.
+        """
+
+        if position_tolerance_mm <= 0.0:
+            raise ValueError("position_tolerance_mm must be positive")
+        if orientation_tolerance_deg <= 0.0:
+            raise ValueError("orientation_tolerance_deg must be positive")
+
+        ros_pose = self._pose6_to_ros_pose(target_pose)
+
+        vel_scale = self._clamp_scale(
+            self.default_joint_velocity_scale
+            if velocity_scale is None
+            else velocity_scale
+        )
+        acc_scale = self._clamp_scale(
+            self.default_joint_acceleration_scale
+            if acceleration_scale is None
+            else acceleration_scale
+        )
+
+        constraints = Constraints()
+        constraints.name = "kit_robot_pose_goal"
+
+        # Position goal: a small box around the requested XYZ.
+        position_constraint = PositionConstraint()
+        position_constraint.header.frame_id = self.base_frame
+        position_constraint.link_name = self.eef_link
+        position_constraint.weight = 1.0
+
+        tolerance_m = float(position_tolerance_mm) / 1000.0
+
+        box = SolidPrimitive()
+        box.type = SolidPrimitive.BOX
+        box.dimensions = [
+            2.0 * tolerance_m,
+            2.0 * tolerance_m,
+            2.0 * tolerance_m,
+        ]
+
+        box_pose = Pose()
+        box_pose.position.x = ros_pose.position.x
+        box_pose.position.y = ros_pose.position.y
+        box_pose.position.z = ros_pose.position.z
+        box_pose.orientation.w = 1.0
+
+        position_constraint.constraint_region.primitives.append(box)
+        position_constraint.constraint_region.primitive_poses.append(box_pose)
+        constraints.position_constraints.append(position_constraint)
+
+        # Orientation goal: keep the requested quaternion within a small tolerance.
+        orientation_constraint = OrientationConstraint()
+        orientation_constraint.header.frame_id = self.base_frame
+        orientation_constraint.link_name = self.eef_link
+        orientation_constraint.orientation = ros_pose.orientation
+
+        orientation_tolerance_rad = math.radians(
+            float(orientation_tolerance_deg)
+        )
+        orientation_constraint.absolute_x_axis_tolerance = orientation_tolerance_rad
+        orientation_constraint.absolute_y_axis_tolerance = orientation_tolerance_rad
+        orientation_constraint.absolute_z_axis_tolerance = orientation_tolerance_rad
+        orientation_constraint.weight = 1.0
+        constraints.orientation_constraints.append(orientation_constraint)
+
+        goal = MoveGroup.Goal()
+        goal.request.group_name = self.group_name
+        goal.request.num_planning_attempts = self.planning_attempts
+        goal.request.allowed_planning_time = self.planning_time
+        goal.request.max_velocity_scaling_factor = vel_scale
+        goal.request.max_acceleration_scaling_factor = acc_scale
+        goal.request.goal_constraints = [constraints]
+        goal.request.start_state.is_diff = True
+
+        if self.pipeline_id:
+            goal.request.pipeline_id = self.pipeline_id
+        if self.planner_id:
+            goal.request.planner_id = self.planner_id
+
+        goal.planning_options.plan_only = False
+        goal.planning_options.look_around = False
+        goal.planning_options.replan = True
+        goal.planning_options.replan_attempts = 1
+        goal.planning_options.replan_delay = 0.1
+        goal.planning_options.planning_scene_diff.is_diff = True
+        goal.planning_options.planning_scene_diff.robot_state.is_diff = True
+
+        self.logger.info(
+            f"MoveIt pose goal: {list(target_pose)}, "
+            f"vel_scale={vel_scale:.3f}, acc_scale={acc_scale:.3f}"
+        )
+
+        send_future = self._move_group_client.send_goal_async(goal)
+        goal_handle = self._wait_future(
+            send_future,
+            self.server_timeout,
+            "sending MoveGroup pose goal",
+        )
+
+        if goal_handle is None or not goal_handle.accepted:
+            raise RuntimeError("MoveGroup pose goal was rejected")
+
+        result_future = goal_handle.get_result_async()
+
+        try:
+            wrapped_result = self._wait_future(
+                result_future,
+                self.motion_timeout,
+                "MoveGroup pose execution",
+            )
+        except Exception:
+            try:
+                goal_handle.cancel_goal_async()
+            except Exception:
+                pass
+            raise
+
+        result = wrapped_result.result
+        code = int(result.error_code.val)
+
+        if code != MoveItErrorCodes.SUCCESS:
+            raise RuntimeError(
+                "MoveGroup pose plan/execute failed: "
+                + self._error_name(code)
+            )
+
+        return 0
+
+    # ------------------------------------------------------------------
     # Cartesian straight-line planning (replacement for movel)
     # ------------------------------------------------------------------
 
-    def move_linear(self, target_pose, vel=100, acc=200):
+    def move_linear(self, target_pose, vel=100, acc=200, avoid_collisions=False):
         if vel <= 0 or acc <= 0:
             raise ValueError("vel and acc must be positive")
 
@@ -419,7 +574,7 @@ class Motion:
         request.jump_threshold = self.cartesian_jump_threshold
         request.prismatic_jump_threshold = self.cartesian_prismatic_jump_threshold
         request.revolute_jump_threshold = self.cartesian_revolute_jump_threshold
-        request.avoid_collisions = True
+        request.avoid_collisions = bool(avoid_collisions)
 
         # GetCartesianPath in MoveIt Jazzy can directly limit Cartesian speed.
         request.max_velocity_scaling_factor = 1.0
@@ -519,7 +674,7 @@ class Motion:
             self.rg.move_gripper(open_width, force_val=grip_force)
             time.sleep(2.0)
 
-            self.move_linear(pick_pose_up, vel=vel, acc=acc)
+            self.move_pose(pick_pose_up)
             time.sleep(0.5)
             self.move_linear(pick_pose_down, vel=vel, acc=acc)
 
@@ -527,7 +682,7 @@ class Motion:
             time.sleep(5.0)
             gripper_width = self.rg.get_width()
 
-            self.move_linear(pick_pose_up, vel=vel, acc=acc)
+            self.move_linear(pick_pose_up, vel=vel, acc=acc, avoid_collisions=False)
             self.logger.info(f"gripper_width={gripper_width}")
 
             if gripper_width > 13:
@@ -541,7 +696,7 @@ class Motion:
         self.logger.error("Failed to grip object in all 5 attempts")
         return False
 
-    def place_component(self, component_name, slot_name, approach_height=100):
+    def place_component(self, component_name, slot_name, approach_height=350):
         if slot_name not in self.place_slots:
             raise ValueError(f"Unknown place slot: {slot_name}")
 
@@ -553,25 +708,119 @@ class Motion:
 
         place_pose_up = place_pose_down.copy()
         place_pose_up[2] += approach_height
+
         vel = self.place_config["linear_vel"]
         acc = self.place_config["linear_acc"]
 
+        # ---------------------------------------------------------
+        # PLACE 좌표 확인
+        # ---------------------------------------------------------
+        current_pose = self.get_current_pose()
+
         self.logger.info(
-            f"Place component: {component_name}, slot={slot_name}, "
-            f"pose={place_pose_down}"
+            f"[PLACE] component={component_name}, slot={slot_name}"
         )
 
-        self.move_linear(place_pose_up, vel=vel, acc=acc)
+        self.logger.info(
+            "[PLACE] current_pose = "
+            f"[x={current_pose[0]:.2f}, "
+            f"y={current_pose[1]:.2f}, "
+            f"z={current_pose[2]:.2f}, "
+            f"rx={current_pose[3]:.2f}, "
+            f"ry={current_pose[4]:.2f}, "
+            f"rz={current_pose[5]:.2f}]"
+        )
+
+        self.logger.info(
+            "[PLACE] place_pose_up = "
+            f"[x={place_pose_up[0]:.2f}, "
+            f"y={place_pose_up[1]:.2f}, "
+            f"z={place_pose_up[2]:.2f}, "
+            f"rx={place_pose_up[3]:.2f}, "
+            f"ry={place_pose_up[4]:.2f}, "
+            f"rz={place_pose_up[5]:.2f}]"
+        )
+
+        self.logger.info(
+            "[PLACE] place_pose_down = "
+            f"[x={place_pose_down[0]:.2f}, "
+            f"y={place_pose_down[1]:.2f}, "
+            f"z={place_pose_down[2]:.2f}, "
+            f"rx={place_pose_down[3]:.2f}, "
+            f"ry={place_pose_down[4]:.2f}, "
+            f"rz={place_pose_down[5]:.2f}]"
+        )
+
+        self.logger.info(
+            f"[PLACE] approach_height={approach_height} mm, "
+            f"vel={vel}, acc={acc}"
+        )
+
+        # ---------------------------------------------------------
+        # 1. PLACE 상공 이동
+        # ---------------------------------------------------------
+        self.logger.info(
+            f"[PLACE] move_pose -> place_pose_up: {place_pose_up}"
+        )
+
+        self.move_pose(place_pose_up)
+
+        current_pose = self.get_current_pose()
+        self.logger.info(
+            f"[PLACE] actual pose after move_pose = {current_pose}"
+        )
+
         time.sleep(0.5)
-        self.move_linear(place_pose_down, vel=vel, acc=acc)
+
+        # ---------------------------------------------------------
+        # 2. PLACE 위치까지 직선 하강
+        # ---------------------------------------------------------
+        self.logger.info(
+            f"[PLACE] move_linear -> place_pose_down: {place_pose_down}"
+        )
+
+        self.move_linear(
+            place_pose_down,
+            vel=vel,
+            acc=acc
+        )
+
+        current_pose = self.get_current_pose()
+        self.logger.info(
+            f"[PLACE] actual pose after downward move = {current_pose}"
+        )
+
+        # ---------------------------------------------------------
+        # 3. 물체 놓기
+        # ---------------------------------------------------------
+        self.logger.info("[PLACE] Opening gripper")
         self.rg.open_gripper()
         time.sleep(2.0)
-        self.move_linear(place_pose_up, vel=vel, acc=acc)
 
-        self.logger.info(f"Complete place: {component_name} -> {slot_name}")
+        # ---------------------------------------------------------
+        # 4. 다시 상공으로 상승
+        # ---------------------------------------------------------
+        self.logger.info(
+            f"[PLACE] retreat move_linear -> place_pose_up: {place_pose_up}"
+        )
 
-    def recover_to_safe_pose(self):
-        self.logger.warning("Recovering to safe pose")
+        self.move_linear(
+            place_pose_up,
+            vel=vel,
+            acc=acc
+        )
+
+        current_pose = self.get_current_pose()
+        self.logger.info(
+            f"[PLACE] actual pose after retreat = {current_pose}"
+        )
+
+        self.logger.info(
+            f"Complete place: {component_name} -> {slot_name}"
+        )
+
+        def recover_to_safe_pose(self):
+            self.logger.warning("Recovering to safe pose")
         self.rg.open_gripper()
         time.sleep(2.0)
         result = self.move_home()

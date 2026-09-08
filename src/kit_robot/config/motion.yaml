@@ -7,7 +7,7 @@ motion:
   moveit:
     planning_group: "manipulator"
     base_frame: "base_link"
-    eef_link: "tool0"
+    eef_link: "link_6"
 
     joint_names:
       - "joint_1"
@@ -19,9 +19,9 @@ motion:
 
     # Standard move_group capability names. If your launch namespaces move_group,
     # change these to e.g. /dsr01/move_action, etc.
-    move_group_action: "/move_action"
-    execute_trajectory_action: "/execute_trajectory"
-    cartesian_path_service: "/compute_cartesian_path"
+    move_group_action: "/dsr01/move_action"
+    execute_trajectory_action: "/dsr01/execute_trajectory"
+    cartesian_path_service: "/dsr01/compute_cartesian_path"
 
     server_ready_timeout_sec: 15.0
     motion_timeout_sec: 60.0
@@ -72,7 +72,7 @@ motion:
 
     inspection_pose:
       type: "joint"
-      pos: [-43.84, -10.40, 59.60, -22.16, 107.55, -55.35]
+      pos: [173.0, 7.0, 54.0, 0.0, 117.0, 80.0]
       joint_vel: 30.0
       joint_acc: 60.0
       joint_velocity_scale: 0.15
@@ -84,19 +84,19 @@ motion:
 
     slots:
       slot_1:
-        pos: [-20.0, -700.0, 150.0, 90.0, -150.0, 180.0]
+        pos: [-397.42, 138.87, 230.0, 41.74, 179.48, -136.13]
 
       slot_2:
-        pos: [-20.0, -540.0, 150.0, 90.0, -150.0, 180.0]
+        pos: [-397.42, 3.44, 230.0, 39.02, 179.37, -138.95]
 
       slot_3:
-        pos: [-20.0, -380.0, 150.0, 90.0, -150.0, 180.0]
+        pos: [-397.42, -132.0, 230.0, 36.29, 179.26, -141.78]
 
       slot_4:
-        pos: [200.0, -700.0, 150.0, 90.0, -150.0, 180.0]
+        pos: [-513.55, 138.87, 230.0, 39.02, 179.37, -138.95]
 
       slot_5:
-        pos: [200.0, -540.0, 150.0, 90.0, -150.0, 180.0]
+        pos: [-513.55, 3.44, 230.0, 36.29, 179.26, -141.78]
 
       slot_6:
-        pos: [200.0, -380.0, 150.0, 90.0, -150.0, 180.0]
+        pos: [-513.55, -132.0, 230.0, 33.57, 179.15, -144.6]

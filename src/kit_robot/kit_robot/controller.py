@@ -606,8 +606,6 @@ class Controller(Node):
                 try:
                     if self.task_fatal:
                         self.motion.recover_to_safe_pose()
-                    else:
-                        self.motion.move_home()
                 except Exception as error:
                     self.task_fatal = True
                     self.error_code = "recovery_failed"
