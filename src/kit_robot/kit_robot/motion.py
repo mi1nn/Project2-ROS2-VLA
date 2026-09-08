@@ -3,12 +3,14 @@ import yaml
 import rclpy
 import DR_init
 import json
+import time
 
 from ament_index_python.packages import get_package_share_directory
 from .onrobot import RG
 
 ROBOT_ID = "dsr01"
 ROBOT_MODEL = "m0609"
+TCP_NAME = "GripperDA_v1"
 
 
 def _set_dr_init(node):
@@ -72,24 +74,41 @@ class Motion:
                 get_current_posx,
                 posx,
                 posj,
-                # trans,
-                # set_tool,
-                # set_tcp,
+                set_robot_mode,
+                set_tcp,
+                get_tcp,
+                ROBOT_MODE_MANUAL,
+                ROBOT_MODE_AUTONOMOUS,
                 DR_BASE,
                 DR_TOOL,
             )
         except ImportError as e:
             raise ImportError("failed import dsr library") from e
 
-        # if set_tool("Tool Weight") != 0:
-        #     raise RuntimeError(
-        #         "Failed to set tool: Tool Weight"
-        #     )
+        if set_robot_mode(ROBOT_MODE_MANUAL) != 0:
+            raise RuntimeError("Failed to change robot mode to MANUAL")
 
-        # if set_tcp("GripperDA_v1") != 0:
-        #     raise RuntimeError(
-        #         "Failed to set TCP: GripperDA_v1"
-        #     )
+        time.sleep(0.5)
+
+        if set_tcp(TCP_NAME) != 0:
+            raise RuntimeError(f"Failed to set TCP: {TCP_NAME}")
+
+        current_tcp = get_tcp()
+
+        if current_tcp != TCP_NAME:
+            raise RuntimeError(
+                f"TCP verification failed: "
+                f"expected={TCP_NAME}, current={current_tcp}"
+            )
+
+        if set_robot_mode(ROBOT_MODE_AUTONOMOUS) != 0:
+            raise RuntimeError("Failed to change robot mode to AUTONOMOUS")
+
+        time.sleep(0.5)
+
+        self._dsr_node.get_logger().info(
+            f"TCP initialized: {current_tcp}"
+        )
 
         self.movej = movej
         self.movel = movel
@@ -262,7 +281,7 @@ class Motion:
             raise ValueError(f'Unknown place slot: {slot_name}')
         place_pose_down = list(self.place_slots[slot_name]['pos'])
 
-        place_approach = list(self.place_slots['slot_0']['pos'])
+        #place_approach = list(self.place_slots['slot_0']['pos'])
 
         if len(place_pose_down) != 6:
             raise ValueError(f"{slot_name} pose must be [x, y, z, rx, ry, rz]")
@@ -276,7 +295,8 @@ class Motion:
 
         print('move to approach pose')
 
-        self.move_arc(place_approach, height=50, steps=6, vel=vel, acc=acc)
+        #self.move_arc(place_approach, height=50, steps=6, vel=vel, acc=acc)
+        self.move_to_inspection_pose()
 
         print(
             f"Place component: {component_name}, "
@@ -290,7 +310,8 @@ class Motion:
         self.rg.open_gripper()
         self.wait(2.0)
         self.move_linear(place_pose_up, vel=vel, acc=acc)
-        self.move_linear(place_approach,vel=vel,acc=acc)
+        #self.move_linear(place_approach,vel=vel,acc=acc)
+        self.move_to_inspection_pose()
 
         print(f"Complete place: {component_name} -> {slot_name}")
 
