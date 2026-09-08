@@ -682,9 +682,7 @@ class Motion:
             time.sleep(5.0)
 
             self.move_linear(pick_pose_up, vel=vel, acc=acc, avoid_collisions=False)
-            self.logger.info(f"gripper_width={gripper_width}")
-
-            gripper_width = self.rg.get_status()
+            time.sleep(1.0)
 
             gripper_status = self.rg.get_status()
             grip_detected = bool(gripper_status[1])
@@ -692,6 +690,8 @@ class Motion:
             if grip_detected:
                 self.logger.info("Successfully gripped object")
                 return True
+            else:
+                print(f"{attempt_index + 1} try, Failed to grip object")
 
             self.logger.warning(
                 f"Grasp check failed ({attempt_index + 1}/5)"
