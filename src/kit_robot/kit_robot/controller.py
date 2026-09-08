@@ -1211,9 +1211,14 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
-        node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
+        # Motion owns a private MoveIt executor/node. Stop it before shutting ROS down.
+        try:
+            if node.motion is not None and hasattr(node.motion, "shutdown"):
+                node.motion.shutdown()
+        finally:
+            node.destroy_node()
+            if rclpy.ok():
+                rclpy.shutdown()
 
 
 if __name__ == "__main__":

@@ -1,249 +1,603 @@
-import os
-import yaml
-import rclpy
-import DR_init
 import json
+import math
+import os
+import threading
+import time
+import warnings
 
+import rclpy
+import yaml
 from ament_index_python.packages import get_package_share_directory
+from geometry_msgs.msg import Pose
+from moveit_msgs.action import ExecuteTrajectory, MoveGroup
+from moveit_msgs.msg import Constraints, JointConstraint, MoveItErrorCodes
+from moveit_msgs.srv import GetCartesianPath
+from rclpy.action import ActionClient
+from rclpy.duration import Duration
+from rclpy.executors import MultiThreadedExecutor
+from rclpy.time import Time
+from scipy.spatial.transform import Rotation
+from tf2_ros import Buffer, TransformListener
+
 from .onrobot import RG
 
-ROBOT_ID = "dsr01"
-ROBOT_MODEL = "m0609"
-
-
-def _set_dr_init(node):
-    '''DR_init.__dsr__* 설정. class 본문에서 직접 쓰면 name mangling으로
-    엉뚱한 속성(_Motion__dsr__id 등)에 저장되므로 반드시 모듈 레벨 함수로 둔다.'''
-    DR_init.__dsr__id = ROBOT_ID
-    DR_init.__dsr__model = ROBOT_MODEL
-    DR_init.__dsr__node = node
-
-
-import DR_init
-ROBOT_ID = "dsr01"
-ROBOT_MODEL = "m0609"
 
 class Motion:
+    """MoveIt2 based motion backend.
+
+    Public methods intentionally keep the same contract as the previous DSR_ROBOT2
+    implementation so Controller and PositionEstimationNode do not need to know which
+    robot motion backend is in use.
+
+    External pose convention kept for compatibility:
+      [x_mm, y_mm, z_mm, rx_deg, ry_deg, rz_deg]
+    where orientation is ZYZ Euler, matching the previous Doosan posx convention used
+    by position_estimation.py and the hand-eye calibration data.
+    """
+
     def __init__(self, node):
-
         if node is None:
-            raise ValueError("ROS 2 node is required for DSR initialization.")
+            raise ValueError("ROS 2 node is required.")
 
-        DR_init.__dsr__id = ROBOT_ID
-        DR_init.__dsr__model = ROBOT_MODEL
-        DR_init.__dsr__node = node
+        self.node = node
+        self.logger = node.get_logger()
 
         config_path = os.path.join(
             get_package_share_directory("kit_robot"), "config", "motion.yaml"
         )
-
         with open(config_path, "r", encoding="utf-8") as file:
             config = yaml.safe_load(file)["motion"]
 
         self.positions = config["positions"]
-        self.place_config = config['place']
-        self.place_slots = self.place_config['slots']
+        self.place_config = config["place"]
+        self.place_slots = self.place_config["slots"]
+        self.moveit_config = config.get("moveit", {})
 
         grasp_params_path = os.path.join(
-            get_package_share_directory('kit_robot'),
-            'resource',
-            'grasp_params.json',
-            )
-
-        with open(grasp_params_path, 'r', encoding='utf-8') as file:
+            get_package_share_directory("kit_robot"),
+            "resource",
+            "grasp_params.json",
+        )
+        with open(grasp_params_path, "r", encoding="utf-8") as file:
             self.grasp_params = json.load(file)
 
-        # DSR_ROBOT2는 서비스 이름을 자기 노드 네임스페이스 기준 상대경로로 연다
-        # (예: "dsr_controller2/motion/move_joint").  robot_id는 서비스 이름에
-        # 안 들어가므로, Controller 노드(네임스페이스 없음)를 그대로 넘기면
-        # /dsr01/dsr_controller2/... 를 못 찾고 영원히 대기한다.
-        # 레퍼런스(robot_control.py)처럼 namespace=ROBOT_ID인 전용 노드를 따로 둔다.
-        # DSR_ROBOT2는 import 시점에 DR_init.__dsr__node로 서비스 client를 만들기
-        # 때문에 import 전에 반드시 설정해야 한다.
-        self._dsr_node = rclpy.create_node("dsr_interface", namespace=ROBOT_ID)
-        _set_dr_init(self._dsr_node)
-
-        try:
-            from DSR_ROBOT2 import (
-                movej,
-                movel,
-                wait,
-                get_current_posx,
-                posx,
-                posj,
-                # trans,
-                # set_tool,
-                # set_tcp,
-                DR_BASE,
-                DR_TOOL,
+        # MoveIt / TF configuration. These defaults match the standard Doosan M0609
+        # MoveIt model. If the custom RG2 SRDF uses another tip, change eef_link only.
+        self.group_name = self.moveit_config.get("planning_group", "manipulator")
+        self.base_frame = self.moveit_config.get("base_frame", "base_link")
+        self.eef_link = self.moveit_config.get("eef_link", "tool0")
+        self.joint_names = list(
+            self.moveit_config.get(
+                "joint_names",
+                ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"],
             )
-        except ImportError as e:
-            raise ImportError("failed import dsr library") from e
+        )
+        if len(self.joint_names) != 6:
+            raise ValueError("moveit.joint_names must contain exactly 6 joints.")
 
-        # if set_tool("Tool Weight") != 0:
-        #     raise RuntimeError(
-        #         "Failed to set tool: Tool Weight"
-        #     )
+        self.move_group_action_name = self.moveit_config.get(
+            "move_group_action", "/move_action"
+        )
+        self.execute_action_name = self.moveit_config.get(
+            "execute_trajectory_action", "/execute_trajectory"
+        )
+        self.cartesian_service_name = self.moveit_config.get(
+            "cartesian_path_service", "/compute_cartesian_path"
+        )
 
-        # if set_tcp("GripperDA_v1") != 0:
-        #     raise RuntimeError(
-        #         "Failed to set TCP: GripperDA_v1"
-        #     )
+        self.server_timeout = float(
+            self.moveit_config.get("server_ready_timeout_sec", 15.0)
+        )
+        self.motion_timeout = float(
+            self.moveit_config.get("motion_timeout_sec", 60.0)
+        )
+        self.tf_timeout = float(self.moveit_config.get("tf_timeout_sec", 2.0))
+        self.planning_time = float(
+            self.moveit_config.get("planning_time_sec", 5.0)
+        )
+        self.planning_attempts = int(
+            self.moveit_config.get("planning_attempts", 5)
+        )
+        self.pipeline_id = str(self.moveit_config.get("pipeline_id", ""))
+        self.planner_id = str(self.moveit_config.get("planner_id", ""))
 
-        self.movej = movej
-        self.movel = movel
-        self.wait = wait
-        self.get_current_posx = get_current_posx
-        self.posx = posx
-        self.posj = posj
-        # self.trans = trans
-        self.DR_BASE = DR_BASE
-        self.DR_TOOL = DR_TOOL
+        self.joint_tolerance_rad = math.radians(
+            float(self.moveit_config.get("joint_tolerance_deg", 0.5))
+        )
+        self.default_joint_velocity_scale = self._clamp_scale(
+            self.moveit_config.get("default_joint_velocity_scale", 0.15)
+        )
+        self.default_joint_acceleration_scale = self._clamp_scale(
+            self.moveit_config.get("default_joint_acceleration_scale", 0.15)
+        )
+
+        self.cartesian_max_step_m = float(
+            self.moveit_config.get("cartesian_max_step_m", 0.005)
+        )
+        self.cartesian_min_fraction = float(
+            self.moveit_config.get("cartesian_min_fraction", 0.999)
+        )
+        self.cartesian_jump_threshold = float(
+            self.moveit_config.get("cartesian_jump_threshold", 0.0)
+        )
+        self.cartesian_prismatic_jump_threshold = float(
+            self.moveit_config.get("cartesian_prismatic_jump_threshold", 0.0)
+        )
+        self.cartesian_revolute_jump_threshold = float(
+            self.moveit_config.get("cartesian_revolute_jump_threshold", 0.0)
+        )
+        self.cartesian_acc_reference_mm_s2 = float(
+            self.moveit_config.get("cartesian_acc_reference_mm_s2", 1000.0)
+        )
+        if self.cartesian_max_step_m <= 0.0:
+            raise ValueError("moveit.cartesian_max_step_m must be > 0.")
+        if not 0.0 < self.cartesian_min_fraction <= 1.0:
+            raise ValueError("moveit.cartesian_min_fraction must be in (0, 1].")
+        if self.cartesian_acc_reference_mm_s2 <= 0.0:
+            raise ValueError("moveit.cartesian_acc_reference_mm_s2 must be > 0.")
+
+        # A dedicated node/executor lets Motion synchronously wait for MoveIt actions
+        # without blocking Controller's state-machine node or nesting rclpy.spin calls.
+        self._moveit_node = rclpy.create_node("kit_moveit_interface")
+        self._executor = MultiThreadedExecutor(num_threads=2)
+        self._executor.add_node(self._moveit_node)
+        self._spin_thread = threading.Thread(
+            target=self._executor.spin,
+            name="kit_moveit_executor",
+            daemon=True,
+        )
+        self._spin_thread.start()
+
+        self._move_group_client = ActionClient(
+            self._moveit_node, MoveGroup, self.move_group_action_name
+        )
+        self._execute_client = ActionClient(
+            self._moveit_node, ExecuteTrajectory, self.execute_action_name
+        )
+        self._cartesian_client = self._moveit_node.create_client(
+            GetCartesianPath, self.cartesian_service_name
+        )
+
+        self._tf_buffer = Buffer()
+        self._tf_listener = TransformListener(
+            self._tf_buffer, self._moveit_node, spin_thread=False
+        )
 
         self.rg = RG("rg2", "192.168.1.1", 502)
 
+        self._wait_for_moveit_servers()
+        self.logger.info(
+            "MoveIt2 Motion initialized: "
+            f"group={self.group_name}, base={self.base_frame}, eef={self.eef_link}"
+        )
+
+    # ------------------------------------------------------------------
+    # Common helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _clamp_scale(value):
+        value = float(value)
+        if not math.isfinite(value):
+            raise ValueError("MoveIt scaling factor must be finite.")
+        return min(1.0, max(0.001, value))
+
+    def _wait_for_moveit_servers(self):
+        if not self._move_group_client.wait_for_server(timeout_sec=self.server_timeout):
+            raise RuntimeError(
+                f"MoveGroup action unavailable: {self.move_group_action_name}"
+            )
+        if not self._execute_client.wait_for_server(timeout_sec=self.server_timeout):
+            raise RuntimeError(
+                f"ExecuteTrajectory action unavailable: {self.execute_action_name}"
+            )
+        if not self._cartesian_client.wait_for_service(timeout_sec=self.server_timeout):
+            raise RuntimeError(
+                f"GetCartesianPath service unavailable: {self.cartesian_service_name}"
+            )
+
+    def _wait_future(self, future, timeout_sec, description):
+        deadline = time.monotonic() + timeout_sec
+        while rclpy.ok() and not future.done():
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"{description} timed out after {timeout_sec:.1f}s")
+            time.sleep(0.01)
+
+        if not rclpy.ok() and not future.done():
+            raise RuntimeError(f"ROS shutdown while waiting for {description}")
+        if future.cancelled():
+            raise RuntimeError(f"{description} was cancelled")
+
+        exception = future.exception()
+        if exception is not None:
+            raise RuntimeError(f"{description} failed: {exception}") from exception
+        return future.result()
+
+    @staticmethod
+    def _error_name(code):
+        # Keep the numeric value because generated Python messages do not expose
+        # a guaranteed enum-to-string helper across MoveIt releases.
+        return f"MoveItErrorCodes({code})"
+
+    @staticmethod
+    def _pose6_to_ros_pose(pose6):
+        pose = list(pose6)
+        if len(pose) != 6:
+            raise ValueError("target_pose must be [x, y, z, rx, ry, rz]")
+        if not all(math.isfinite(float(v)) for v in pose):
+            raise ValueError("target_pose contains non-finite values")
+
+        msg = Pose()
+        msg.position.x = float(pose[0]) / 1000.0
+        msg.position.y = float(pose[1]) / 1000.0
+        msg.position.z = float(pose[2]) / 1000.0
+
+        quat = Rotation.from_euler(
+            "ZYZ", [float(pose[3]), float(pose[4]), float(pose[5])], degrees=True
+        ).as_quat()  # scipy order: x, y, z, w
+        msg.orientation.x = float(quat[0])
+        msg.orientation.y = float(quat[1])
+        msg.orientation.z = float(quat[2])
+        msg.orientation.w = float(quat[3])
+        return msg
+
+    def _joint_scales(self, config):
+        vel_scale = config.get(
+            "joint_velocity_scale", self.default_joint_velocity_scale
+        )
+        acc_scale = config.get(
+            "joint_acceleration_scale", self.default_joint_acceleration_scale
+        )
+        return self._clamp_scale(vel_scale), self._clamp_scale(acc_scale)
+
+    # ------------------------------------------------------------------
+    # MoveIt joint planning (replacement for movej)
+    # ------------------------------------------------------------------
+
+    def move_joint(self, joint_deg, velocity_scale=None, acceleration_scale=None):
+        values = list(joint_deg)
+        if len(values) != len(self.joint_names):
+            raise ValueError(
+                f"joint target must have {len(self.joint_names)} values, got {len(values)}"
+            )
+        if not all(math.isfinite(float(v)) for v in values):
+            raise ValueError("joint target contains non-finite values")
+
+        vel_scale = self._clamp_scale(
+            self.default_joint_velocity_scale
+            if velocity_scale is None
+            else velocity_scale
+        )
+        acc_scale = self._clamp_scale(
+            self.default_joint_acceleration_scale
+            if acceleration_scale is None
+            else acceleration_scale
+        )
+
+        constraints = Constraints()
+        constraints.name = "kit_robot_joint_goal"
+        for joint_name, value_deg in zip(self.joint_names, values):
+            joint_constraint = JointConstraint()
+            joint_constraint.joint_name = joint_name
+            joint_constraint.position = math.radians(float(value_deg))
+            joint_constraint.tolerance_above = self.joint_tolerance_rad
+            joint_constraint.tolerance_below = self.joint_tolerance_rad
+            joint_constraint.weight = 1.0
+            constraints.joint_constraints.append(joint_constraint)
+
+        goal = MoveGroup.Goal()
+        goal.request.group_name = self.group_name
+        goal.request.num_planning_attempts = self.planning_attempts
+        goal.request.allowed_planning_time = self.planning_time
+        goal.request.max_velocity_scaling_factor = vel_scale
+        goal.request.max_acceleration_scaling_factor = acc_scale
+        goal.request.goal_constraints = [constraints]
+        goal.request.start_state.is_diff = True  # current MoveIt planning-scene state
+        if self.pipeline_id:
+            goal.request.pipeline_id = self.pipeline_id
+        if self.planner_id:
+            goal.request.planner_id = self.planner_id
+
+        # plan_only=False makes move_group both plan and execute through its
+        # configured ros2_control trajectory controller.
+        goal.planning_options.plan_only = False
+        goal.planning_options.look_around = False
+        goal.planning_options.replan = True
+        goal.planning_options.replan_attempts = 1
+        goal.planning_options.replan_delay = 0.1
+        # Preserve the currently monitored planning scene instead of replacing it.
+        goal.planning_options.planning_scene_diff.is_diff = True
+        goal.planning_options.planning_scene_diff.robot_state.is_diff = True
+
+        self.logger.info(
+            f"MoveIt joint goal: {values}, vel_scale={vel_scale:.3f}, "
+            f"acc_scale={acc_scale:.3f}"
+        )
+
+        send_future = self._move_group_client.send_goal_async(goal)
+        goal_handle = self._wait_future(
+            send_future, self.server_timeout, "sending MoveGroup goal"
+        )
+        if goal_handle is None or not goal_handle.accepted:
+            raise RuntimeError("MoveGroup goal was rejected")
+
+        result_future = goal_handle.get_result_async()
+        try:
+            wrapped_result = self._wait_future(
+                result_future, self.motion_timeout, "MoveGroup execution"
+            )
+        except Exception:
+            try:
+                goal_handle.cancel_goal_async()
+            except Exception:
+                pass
+            raise
+
+        result = wrapped_result.result
+        code = int(result.error_code.val)
+        if code != MoveItErrorCodes.SUCCESS:
+            raise RuntimeError(
+                "MoveGroup plan/execute failed: " + self._error_name(code)
+            )
+        return 0
+
     def move_home(self):
         config = self.positions["home"]
-        if config["type"] == "joint":
-            home_pos = self.posj(config["pos"])
-        else:
+        if config["type"] != "joint":
             raise TypeError("home position must be 'joint'")
-
-        result = self.movej(home_pos, vel=config["joint_vel"], acc=config["joint_acc"])
-        if result != 0:
-            raise RuntimeError(f"move_home failed: result={result}")
-
-        return result
+        vel_scale, acc_scale = self._joint_scales(config)
+        return self.move_joint(config["pos"], vel_scale, acc_scale)
 
     def move_to_observation_pose(self):
         config = self.positions["observation_pose"]
-        if config["type"] == "joint":
-            pick_camera_pos = self.posj(config["pos"])
-        else:
+        if config["type"] != "joint":
             raise TypeError("observation_pose must be 'joint'")
-
-        result = self.movej(pick_camera_pos, vel=config["joint_vel"], acc=config["joint_acc"])
-        if result != 0:
-            raise RuntimeError(f'move_to_observation_pose failed: result={result}')
-
-        return result
+        vel_scale, acc_scale = self._joint_scales(config)
+        return self.move_joint(config["pos"], vel_scale, acc_scale)
 
     def move_to_inspection_pose(self):
         config = self.positions["inspection_pose"]
-        if config["type"] == "joint":
-            place_camera_pos = self.posj(config["pos"])
-        else:
+        if config["type"] != "joint":
             raise TypeError("inspection_pose must be 'joint'")
+        vel_scale, acc_scale = self._joint_scales(config)
+        return self.move_joint(config["pos"], vel_scale, acc_scale)
 
-        result = self.movej(place_camera_pos, vel=config["joint_vel"], acc=config["joint_acc"])
-        if result != 0:
-            raise RuntimeError(f'move_to_inspection_pose failed: result={result}')
-
-        return result
+    # ------------------------------------------------------------------
+    # Current TCP pose: keep old DSR posx-compatible mm + ZYZ-degree format
+    # ------------------------------------------------------------------
 
     def get_current_pose(self):
-        pose, _ = self.get_current_posx(ref=self.DR_BASE)
-        if pose is None:
-            raise RuntimeError("Failed to get current posx")
-        return list(pose)
+        try:
+            transform = self._tf_buffer.lookup_transform(
+                self.base_frame,
+                self.eef_link,
+                Time(),
+                timeout=Duration(seconds=self.tf_timeout),
+            )
+        except Exception as error:
+            raise RuntimeError(
+                f"TF lookup failed: {self.base_frame} <- {self.eef_link}: {error}"
+            ) from error
+
+        translation = transform.transform.translation
+        rotation = transform.transform.rotation
+        quat = [rotation.x, rotation.y, rotation.z, rotation.w]
+
+        # ZYZ has a mathematical singularity at beta=0/pi. scipy can still return
+        # an equivalent Euler triplet; reconstruction of the rotation remains valid.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            rx, ry, rz = Rotation.from_quat(quat).as_euler("ZYZ", degrees=True)
+
+        return [
+            float(translation.x * 1000.0),
+            float(translation.y * 1000.0),
+            float(translation.z * 1000.0),
+            float(rx),
+            float(ry),
+            float(rz),
+        ]
+
+    # ------------------------------------------------------------------
+    # Cartesian straight-line planning (replacement for movel)
+    # ------------------------------------------------------------------
 
     def move_linear(self, target_pose, vel=100, acc=200):
-        pose = list(target_pose)
-        if len(pose) != 6:
-            raise ValueError("target_pose must be [x, y, z, rx, ry, rz]")
-        dsr_pose = self.posx([float(value) for value in pose])
+        if vel <= 0 or acc <= 0:
+            raise ValueError("vel and acc must be positive")
 
-        result = self.movel(dsr_pose, vel=vel, acc=acc, ref=self.DR_BASE)
-        if result != 0:
-            raise RuntimeError(f"movel failed: result={result}, pose={pose}")
-        return result
+        ros_pose = self._pose6_to_ros_pose(target_pose)
+
+        request = GetCartesianPath.Request()
+        request.header.frame_id = self.base_frame
+        request.header.stamp = self._moveit_node.get_clock().now().to_msg()
+        request.start_state.is_diff = True  # current planning-scene state
+        request.group_name = self.group_name
+        request.link_name = self.eef_link
+        request.waypoints = [ros_pose]
+        request.max_step = self.cartesian_max_step_m
+        request.jump_threshold = self.cartesian_jump_threshold
+        request.prismatic_jump_threshold = self.cartesian_prismatic_jump_threshold
+        request.revolute_jump_threshold = self.cartesian_revolute_jump_threshold
+        request.avoid_collisions = True
+
+        # GetCartesianPath in MoveIt Jazzy can directly limit Cartesian speed.
+        request.max_velocity_scaling_factor = 1.0
+        request.max_acceleration_scaling_factor = self._clamp_scale(
+            float(acc) / self.cartesian_acc_reference_mm_s2
+        )
+        request.cartesian_speed_limited_link = self.eef_link
+        request.max_cartesian_speed = float(vel) / 1000.0  # mm/s -> m/s
+
+        self.logger.info(
+            f"MoveIt Cartesian goal: {list(target_pose)}, "
+            f"speed={float(vel):.1f} mm/s"
+        )
+
+        future = self._cartesian_client.call_async(request)
+        response = self._wait_future(
+            future, self.motion_timeout, "GetCartesianPath"
+        )
+        if response is None:
+            raise RuntimeError("GetCartesianPath returned no response")
+
+        code = int(response.error_code.val)
+        if code != MoveItErrorCodes.SUCCESS:
+            raise RuntimeError(
+                "Cartesian planning failed: " + self._error_name(code)
+            )
+
+        if response.fraction < self.cartesian_min_fraction:
+            raise RuntimeError(
+                "Cartesian path incomplete: "
+                f"fraction={response.fraction:.3f} < {self.cartesian_min_fraction:.3f}"
+            )
+
+        # If the requested pose is effectively the current pose MoveIt may return
+        # a valid empty trajectory. Treat that as success rather than sending it.
+        points = response.solution.joint_trajectory.points
+        if not points:
+            self.logger.info("Cartesian target already satisfied (empty trajectory).")
+            return 0
+
+        goal = ExecuteTrajectory.Goal()
+        goal.trajectory = response.solution
+        goal.controller_names = []  # let MoveIt choose configured controller(s)
+
+        send_future = self._execute_client.send_goal_async(goal)
+        goal_handle = self._wait_future(
+            send_future, self.server_timeout, "sending ExecuteTrajectory goal"
+        )
+        if goal_handle is None or not goal_handle.accepted:
+            raise RuntimeError("ExecuteTrajectory goal was rejected")
+
+        result_future = goal_handle.get_result_async()
+        try:
+            wrapped_result = self._wait_future(
+                result_future, self.motion_timeout, "Cartesian trajectory execution"
+            )
+        except Exception:
+            try:
+                goal_handle.cancel_goal_async()
+            except Exception:
+                pass
+            raise
+
+        code = int(wrapped_result.result.error_code.val)
+        if code != MoveItErrorCodes.SUCCESS:
+            raise RuntimeError(
+                "ExecuteTrajectory failed: " + self._error_name(code)
+            )
+        return 0
+
+    # ------------------------------------------------------------------
+    # High-level pick/place API kept identical to old Motion
+    # ------------------------------------------------------------------
 
     def pick_component(self, component_name, target_pose, vel=80, acc=160):
         pose = list(target_pose)
         if len(pose) != 6:
             raise ValueError("target_pose must be [x, y, z, rx, ry, rz]")
 
-        params = self.grasp_params.get(component_name, self.grasp_params['_default'])
-        open_width = params['width']
-        grip_force = params['force']
-        approach_height = params['approach']
+        params = self.grasp_params.get(
+            component_name, self.grasp_params["_default"]
+        )
+        open_width = params["width"]
+        grip_force = params["force"]
+        approach_height = params["approach"]
 
-        result = False
         pick_pose_down = pose.copy()
         pick_pose_up = pose.copy()
         pick_pose_up[2] += approach_height
 
-        print(
-            f"Pick component: {component_name}, "
-            f"width={open_width}, "
-            f"force={grip_force}, "
-            f"approach={approach_height}"
+        self.logger.info(
+            f"Pick component: {component_name}, width={open_width}, "
+            f"force={grip_force}, approach={approach_height}"
         )
 
-        for i in range(5):
+        for attempt_index in range(5):
             self.rg.move_gripper(open_width, force_val=grip_force)
-            self.wait(2.0)
-            self.move_linear(pick_pose_up, vel=vel, acc=acc)
-            self.wait(0.5)
-            self.move_linear(pick_pose_down, vel=vel, acc=acc)
-            self.rg.close_gripper(force_val=grip_force)
-            self.wait(5.0)
+            time.sleep(2.0)
 
+            self.move_linear(pick_pose_up, vel=vel, acc=acc)
+            time.sleep(0.5)
+            self.move_linear(pick_pose_down, vel=vel, acc=acc)
+
+            self.rg.close_gripper(force_val=grip_force)
+            time.sleep(5.0)
             gripper_width = self.rg.get_width()
 
             self.move_linear(pick_pose_up, vel=vel, acc=acc)
-            print(f'gripper_width: {gripper_width}')
+            self.logger.info(f"gripper_width={gripper_width}")
 
             if gripper_width > 13:
-                print('Success to grip object')
-                result = True
-                break
-            else:
-                print(f'{i+1} try, Failed to grip object')
-                
+                self.logger.info("Successfully gripped object")
+                return True
 
-            if i == 4:
-                print('Failed to grip object in all try')
-                result = False
+            self.logger.warning(
+                f"Grasp check failed ({attempt_index + 1}/5)"
+            )
 
-        return result
+        self.logger.error("Failed to grip object in all 5 attempts")
+        return False
 
     def place_component(self, component_name, slot_name, approach_height=100):
         if slot_name not in self.place_slots:
-            raise ValueError(f'Unknown place slot: {slot_name}')
-        place_pose_down = list(self.place_slots[slot_name]['pos'])
+            raise ValueError(f"Unknown place slot: {slot_name}")
 
+        place_pose_down = list(self.place_slots[slot_name]["pos"])
         if len(place_pose_down) != 6:
-            raise ValueError(f"{slot_name} pose must be [x, y, z, rx, ry, rz]")
+            raise ValueError(
+                f"{slot_name} pose must be [x, y, z, rx, ry, rz]"
+            )
 
         place_pose_up = place_pose_down.copy()
         place_pose_up[2] += approach_height
+        vel = self.place_config["linear_vel"]
+        acc = self.place_config["linear_acc"]
 
-        vel = self.place_config['linear_vel']
-        acc = self.place_config['linear_acc']
-
-        print(
-            f"Place component: {component_name}, "
-            f"slot={slot_name}, "
+        self.logger.info(
+            f"Place component: {component_name}, slot={slot_name}, "
             f"pose={place_pose_down}"
         )
 
         self.move_linear(place_pose_up, vel=vel, acc=acc)
-        self.wait(0.5)
+        time.sleep(0.5)
         self.move_linear(place_pose_down, vel=vel, acc=acc)
         self.rg.open_gripper()
-        self.wait(2.0)
-        self.move_linear(place_pose_up,vel=vel,acc=acc)
+        time.sleep(2.0)
+        self.move_linear(place_pose_up, vel=vel, acc=acc)
 
-        print(f"Complete place: {component_name} -> {slot_name}")
+        self.logger.info(f"Complete place: {component_name} -> {slot_name}")
 
     def recover_to_safe_pose(self):
-        print("Recovering to safe pose")
+        self.logger.warning("Recovering to safe pose")
         self.rg.open_gripper()
-        self.wait(2.0)
+        time.sleep(2.0)
         result = self.move_home()
-
         if result != 0:
             raise RuntimeError(f"Failed to recover home: result={result}")
+        self.logger.info("Complete recovery to safe pose")
 
-        print("Complete recovery to safe pose")
+    def shutdown(self):
+        """Stop the private MoveIt executor/node before rclpy.shutdown()."""
+        try:
+            if hasattr(self, "_executor"):
+                self._executor.shutdown(timeout_sec=1.0)
+        except Exception:
+            try:
+                self._executor.cancel()
+            except Exception:
+                pass
+
+        try:
+            if hasattr(self, "_spin_thread") and self._spin_thread.is_alive():
+                self._spin_thread.join(timeout=1.0)
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self, "_moveit_node"):
+                self._moveit_node.destroy_node()
+        except Exception:
+            pass
