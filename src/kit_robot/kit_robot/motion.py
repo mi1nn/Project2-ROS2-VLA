@@ -832,18 +832,26 @@ class Motion:
         return self._move_named_position("home")
 
     def move_to_observation_pose(self):
-        # Map refresh point: stale voxels out (the previous component is gone from
-        # the table by now), then let the cloud through while Controller waits out
-        # observation_settle_sec. The snapshot taken here is what the arm avoids
-        # for the rest of the cycle.
+        # Additive refresh: let the cloud through while Controller waits out
+        # observation_settle_sec, without clearing first. The place-area voxels
+        # from the one-time move_to_inspection_pose() call (Controller does this
+        # once per task, before the first observation) must survive every later
+        # observation, or "avoid the place tray" stops working after component 1.
+        #
+        # ponytail: a picked-up object leaves a ghost voxel behind (occupancy
+        # only grows without an explicit clear), which can make a since-cleared
+        # spot on the pick tray look blocked. Fails safe (overly cautious, not
+        # collision-prone). If that starts blocking real plans, clear just the
+        # vacated grasp footprint here instead of reintroducing a full clear.
         result = self._move_named_position("observation_pose")
-        self.clear_octomap()
         self.set_octomap_mapping(True)
         return result
 
     def move_to_inspection_pose(self):
-        # Second refresh point: the tray is in frame here, so the map picks up the
-        # already-placed components as obstacles.
+        # Clearing refresh: used once per task by Controller (before the first
+        # observation, to seed the place-area map) and once more at the very end
+        # (final inspection). Both times nothing else has planned against stale
+        # voxels since the last clear, so wiping and rebuilding here is safe.
         result = self._move_named_position("inspection_pose")
         self.clear_octomap()
         self.set_octomap_mapping(True)

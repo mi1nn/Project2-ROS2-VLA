@@ -266,6 +266,11 @@ class Controller(Node):
         self.report_completed = False   # REPORT의 중복 처리 방지
         self.failure_stage = ""
 
+        # place(키팅 트레이) 위치 octomap은 작업당 한 번만 만든다. 이후 컴포넌트는
+        # 이 스냅샷을 그대로 재사용한다 — 매 EXECUTE마다 inspect 자세를 다시
+        # 왕복하지 않는다.
+        self.place_octomap_ready = False
+
         # 현재 작업에서 발행한 index 집합. DB 저장 완료를 확인하는 장치는 아니다.
         self.published_component_indices = set()
 
@@ -397,10 +402,21 @@ class Controller(Node):
             try:
                 # 호출 도중 실패해도 복구 검토 대상이 되도록 먼저 표시
                 self.motion_started = True
+
+                if not self.place_octomap_ready:
+                    # 작업당 한 번: place 위치를 먼저 보고 와서 장애물 회피용
+                    # octomap을 만든다. 이후 컴포넌트는 이 스냅샷을 재사용한다.
+                    self.motion.move_to_inspection_pose()
+                    self.place_octomap_ready = True
+
                 self.motion.move_to_observation_pose()
             except Exception as error:
                 self.task_fatal = True
-                self.error_code = "observation_move_failed"
+                self.error_code = (
+                    "initial_octomap_scan_failed"
+                    if not self.place_octomap_ready
+                    else "observation_move_failed"
+                )
                 self.detail = str(error)
                 self.transition_to(
                     State.REPORT,
