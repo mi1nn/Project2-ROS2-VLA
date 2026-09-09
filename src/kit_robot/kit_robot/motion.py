@@ -79,16 +79,19 @@ def merge_octomap_acm(entry_names, matrix, allowed_links):
     return names, matrix
 
 
-def _mask_cloud_polygon(xyz, polygon_px, intrinsics, width, height):
-    """Return a bool array: True for points to KEEP (outside the YOLO mask).
+def _mask_cloud_polygon(xyz, polygons_px, intrinsics, width, height):
+    """Return a bool array: True for points to KEEP (outside the YOLO masks).
 
     ``xyz`` is Nx3 in the camera optical frame (any linear unit — the
-    projection is a ratio, so meters vs mm doesn't matter). ``polygon_px`` is
-    DetectedObject.masking_map, a flat [x0, y0, x1, y1, ...] pixel polygon in
-    the color image ``intrinsics`` belongs to. Points that can't be projected
-    (non-finite/non-positive depth, or landing outside the image) are kept —
-    better to occasionally leak one unmasked point than to silently carve out
-    unrelated geometry.
+    projection is a ratio, so meters vs mm doesn't matter). ``polygons_px`` is
+    a list of DetectedObject.masking_map, each a flat [x0, y0, x1, y1, ...]
+    pixel polygon in the color image ``intrinsics`` belongs to — one class can
+    have several instances in frame at once, and we exclude the union of all
+    of them (picking just one, e.g. "the last one in the message", risks
+    excluding the wrong instance and leaving the real pick target un-excluded).
+    Points that can't be projected (non-finite/non-positive depth, or landing
+    outside the image) are kept — better to occasionally leak one unmasked
+    point than to silently carve out unrelated geometry.
 
     Pure buffer/geometry math so it can be checked without rclpy/sensor_msgs.
     """
@@ -97,8 +100,13 @@ def _mask_cloud_polygon(xyz, polygon_px, intrinsics, width, height):
         return np.zeros(0, dtype=bool)
 
     mask_image = np.zeros((height, width), dtype=np.uint8)
-    polygon = np.asarray(polygon_px, dtype=np.float32).reshape(-1, 2)
-    cv2.fillPoly(mask_image, [np.round(polygon).astype(np.int32)], 1)
+    contours = [
+        np.round(np.asarray(polygon_px, dtype=np.float32).reshape(-1, 2)).astype(
+            np.int32
+        )
+        for polygon_px in polygons_px
+    ]
+    cv2.fillPoly(mask_image, contours, 1)
 
     z = xyz[:, 2]
     projectable = np.isfinite(z) & (z > 0.0)
@@ -631,8 +639,14 @@ class Motion:
         self._octomap_cloud_pub.publish(msg)
 
     def _detection_callback(self, msg):
+        # class_name 하나에 인스턴스가 여러 개일 수 있다(같은 품목 2개 이상).
+        # 마지막 걸로 덮어쓰면 실제로 집으려는 인스턴스가 아닌 다른 인스턴스의
+        # 마스크만 남아 정작 걸러야 할 물체는 그대로 새는 사고가 난다 — 이번
+        # 메시지에 잡힌 같은 클래스는 전부 모아 합집합으로 제외한다.
+        masks = {}
         for obj in msg.objects:
-            self._latest_detection_masks[obj.class_name] = list(obj.masking_map)
+            masks.setdefault(obj.class_name, []).append(list(obj.masking_map))
+        self._latest_detection_masks = masks
 
     def _camera_info_callback(self, msg):
         self._camera_intrinsics = {
@@ -665,10 +679,17 @@ class Motion:
         fresh detection or camera intrinsics yet for that class — better to
         occasionally bake one early hit than to stop relaying entirely.
         """
-        masking_map = self._latest_detection_masks.get(
+        masking_maps = self._latest_detection_masks.get(
             self._octomap_exclusion_component
         )
-        if masking_map is None or self._camera_intrinsics is None:
+        if not masking_maps or self._camera_intrinsics is None:
+            self.logger.warn(
+                "옥토맵 예외 미적용(원본 그대로 중계): "
+                f"component={self._octomap_exclusion_component}, "
+                f"mask={'없음' if not masking_maps else '있음'}, "
+                f"intrinsics={'없음' if self._camera_intrinsics is None else '있음'}",
+                throttle_duration_sec=2.0,
+            )
             return msg
 
         offsets = {field.name: field.offset for field in msg.fields}
@@ -693,10 +714,18 @@ class Motion:
         )
         keep = _mask_cloud_polygon(
             xyz,
-            masking_map,
+            masking_maps,
             self._camera_intrinsics,
             self._camera_width,
             self._camera_height,
+        )
+        kept = int(np.count_nonzero(keep))
+        self.logger.info(
+            "옥토맵 예외 적용: "
+            f"component={self._octomap_exclusion_component}, "
+            f"instances={len(masking_maps)}, "
+            f"total={n_points}, kept={kept}, dropped={n_points - kept}",
+            throttle_duration_sec=2.0,
         )
         raw = np.frombuffer(msg.data, dtype=np.uint8).reshape(
             n_points, msg.point_step

@@ -137,7 +137,7 @@ def test_mask_cloud_polygon_drops_projected_points_inside_mask():
     )
 
     intrinsics = {"fx": 100.0, "fy": 100.0, "ppx": 50.0, "ppy": 50.0}
-    polygon_px = [30, 30, 70, 30, 70, 70, 30, 70]  # 픽셀 30~70 정사각형
+    polygons_px = [[30, 30, 70, 30, 70, 70, 30, 70]]  # 픽셀 30~70 정사각형 1개
 
     xyz = np.array(
         [
@@ -150,7 +150,42 @@ def test_mask_cloud_polygon_drops_projected_points_inside_mask():
     )
 
     keep = motion._mask_cloud_polygon(
-        xyz, polygon_px, intrinsics, width=100, height=100
+        xyz, polygons_px, intrinsics, width=100, height=100
     )
 
     assert list(keep) == [False, True, True, True]
+
+
+def test_mask_cloud_polygon_unions_multiple_instances_of_same_class():
+    """같은 class_name 인스턴스가 여러 개면 마지막 것만 남기지 않고 전부 제외한다.
+
+    _detection_callback 이 마지막 인스턴스로 덮어쓰면, 실제 pick 대상이 아닌
+    다른 인스턴스의 마스크만 남아 정작 걸러야 할 물체는 그대로 샐 수 있다.
+    """
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("cv2")
+    motion = pytest.importorskip(
+        "kit_robot.motion", reason="ROS 런타임 없음 (로봇/도커에서 실행)"
+    )
+
+    intrinsics = {"fx": 100.0, "fy": 100.0, "ppx": 50.0, "ppy": 50.0}
+    # 서로 겹치지 않는 두 정사각형: (10~20)과 (80~90).
+    polygons_px = [
+        [10, 10, 20, 10, 20, 20, 10, 20],
+        [80, 80, 90, 80, 90, 90, 80, 90],
+    ]
+
+    xyz = np.array(
+        [
+            [-0.35, -0.35, 1.0],  # (u,v)=(15,15) -> 첫 인스턴스 안 -> 제거
+            [0.35, 0.35, 1.0],    # (u,v)=(85,85) -> 두 번째 인스턴스 안 -> 제거
+            [0.0, 0.0, 1.0],      # (u,v)=(50,50) -> 둘 다 밖 -> 보존
+        ],
+        dtype=np.float32,
+    )
+
+    keep = motion._mask_cloud_polygon(
+        xyz, polygons_px, intrinsics, width=100, height=100
+    )
+
+    assert list(keep) == [False, False, True]
