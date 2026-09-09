@@ -898,13 +898,8 @@ class Motion:
             self.rg.close_gripper(force_val=grip_force)
             time.sleep(5.0)
 
-<<<<<<< HEAD
-            self.move_linear(pick_pose_up, vel=vel, acc=acc)
-            self.logger.info(f"gripper_width={gripper_width}")
-=======
             self.move_linear(pick_pose_up, vel=vel, acc=acc, avoid_collisions=False)
             time.sleep(1.0)
->>>>>>> 99298fa2ce224899839a871a086d491a56a7666b
 
             gripper_status = self.rg.get_status()
             grip_detected = bool(gripper_status[1])
@@ -932,11 +927,9 @@ class Motion:
                 f"{slot_name} pose must be [x, y, z, rx, ry, rz]"
             )
 
+        # PLACE 목표 위치보다 Z 방향으로 approach_height만큼 높은 안전 위치.
         place_pose_up = place_pose_down.copy()
         place_pose_up[2] += approach_height
-
-        vel = self.place_config["linear_vel"]
-        acc = self.place_config["linear_acc"]
 
         # ---------------------------------------------------------
         # PLACE 좌표 확인
@@ -978,12 +971,13 @@ class Motion:
         )
 
         self.logger.info(
-            f"[PLACE] approach_height={approach_height} mm, "
-            f"vel={vel}, acc={acc}"
+            f"[PLACE] approach_height={approach_height} mm"
         )
 
         # ---------------------------------------------------------
-        # 1. PLACE 상공 이동
+        # 1. PLACE 상공 안전 위치로 이동
+        #    Cartesian 직선 경로를 강제하지 않고 MoveIt이
+        #    collision-aware joint-space 경로를 계획한다.
         # ---------------------------------------------------------
         self.logger.info(
             f"[PLACE] move_pose -> place_pose_up: {place_pose_up}"
@@ -993,27 +987,24 @@ class Motion:
 
         current_pose = self.get_current_pose()
         self.logger.info(
-            f"[PLACE] actual pose after move_pose = {current_pose}"
+            f"[PLACE] actual pose after move_pose(up) = {current_pose}"
         )
 
         time.sleep(0.5)
 
         # ---------------------------------------------------------
-        # 2. PLACE 위치까지 직선 하강
+        # 2. 최종 PLACE 위치로 이동
+        #    기존 move_linear() 대신 move_pose() 사용.
         # ---------------------------------------------------------
         self.logger.info(
-            f"[PLACE] move_linear -> place_pose_down: {place_pose_down}"
+            f"[PLACE] move_pose -> place_pose_down: {place_pose_down}"
         )
 
-        self.move_linear(
-            place_pose_down,
-            vel=vel,
-            acc=acc
-        )
+        self.move_pose(place_pose_down)
 
         current_pose = self.get_current_pose()
         self.logger.info(
-            f"[PLACE] actual pose after downward move = {current_pose}"
+            f"[PLACE] actual pose after move_pose(down) = {current_pose}"
         )
 
         # ---------------------------------------------------------
@@ -1024,17 +1015,14 @@ class Motion:
         time.sleep(2.0)
 
         # ---------------------------------------------------------
-        # 4. 다시 상공으로 상승
+        # 4. 다시 PLACE 상공 안전 위치로 이동
+        #    기존 move_linear() 대신 move_pose() 사용.
         # ---------------------------------------------------------
         self.logger.info(
-            f"[PLACE] retreat move_linear -> place_pose_up: {place_pose_up}"
+            f"[PLACE] retreat move_pose -> place_pose_up: {place_pose_up}"
         )
 
-        self.move_linear(
-            place_pose_up,
-            vel=vel,
-            acc=acc
-        )
+        self.move_pose(place_pose_up)
 
         current_pose = self.get_current_pose()
         self.logger.info(
@@ -1045,12 +1033,10 @@ class Motion:
             f"Complete place: {component_name} -> {slot_name}"
         )
 
+        return True
+
     def recover_to_safe_pose(self):
-<<<<<<< HEAD
         self.logger.warning("Recovering from task failure")
-=======
-        self.logger.warning("Recovering to safe pose")
->>>>>>> 99298fa2ce224899839a871a086d491a56a7666b
         self.rg.open_gripper()
         time.sleep(2.0)
         self.logger.info("Recovery complete; current robot pose is preserved")
