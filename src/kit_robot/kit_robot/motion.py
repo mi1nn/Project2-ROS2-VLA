@@ -1037,8 +1037,33 @@ class Motion:
         # collision-prone). If that starts blocking real plans, clear just the
         # vacated grasp footprint here instead of reintroducing a full clear.
         result = self._move_named_position("observation_pose")
+        self._wait_for_exclusion_mask()
         self.set_octomap_mapping(True)
         return result
+
+    def _wait_for_exclusion_mask(self, timeout_sec=2.0):
+        """예외 걸린 컴포넌트가 있으면, 그 클래스의 첫 YOLO 탐지가 도착할 때까지
+        게이트를 열지 않고 기다린다.
+
+        게이트를 먼저 열고 마스크를 기다리면, 그 사이 들어오는 프레임은
+        무필터로 중계되어 그 물체의 voxel 이 그대로 박힌다 — 부분 삭제
+        API가 없어서 한 번 박히면 이번 관찰에서는 영영 못 뺀다. timeout
+        안에 안 오면(감지 자체가 실패한 상황) 무한정 막아두는 것보다는
+        낫다고 보고 그냥 연다 — 이 경우 pick 자체가 곧 no_candidate 로
+        실패해서 어차피 재시도/에러 경로를 탄다.
+        """
+        component = self._octomap_exclusion_component
+        if component is None:
+            return
+        deadline = time.monotonic() + timeout_sec
+        while component not in self._latest_detection_masks:
+            if time.monotonic() >= deadline:
+                self.logger.warn(
+                    f"옥토맵 예외 대기 타임아웃({timeout_sec}s): "
+                    f"component={component} 탐지가 안 와서 게이트를 그냥 연다"
+                )
+                return
+            time.sleep(0.05)
 
     def move_to_inspection_pose(self):
         # Clearing refresh: used once per task by Controller (before the first

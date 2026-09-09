@@ -5,6 +5,7 @@ RViz 에 voxel 만 안 보임). 로봇을 띄우기 전에 잡는다.
 
 실행: python3 -m pytest src/kit_robot/test/test_octomap_config.py
 """
+import time
 from pathlib import Path
 
 import pytest
@@ -189,3 +190,41 @@ def test_mask_cloud_polygon_unions_multiple_instances_of_same_class():
     )
 
     assert list(keep) == [False, False, True]
+
+
+def test_wait_for_exclusion_mask_returns_immediately_once_mask_present():
+    """마스크가 이미 와있으면 기다리지 않고 바로 반환 — 게이트가 늦게 열리면
+    settle 시간을 그만큼 잡아먹으므로, 준비돼 있을 때 지연이 없어야 한다.
+    """
+    motion = pytest.importorskip(
+        "kit_robot.motion", reason="ROS 런타임 없음 (로봇/도커에서 실행)"
+    )
+
+    class Fake:
+        _octomap_exclusion_component = "양갱"
+        _latest_detection_masks = {"양갱": [[0, 0, 1, 0, 1, 1]]}
+        logger = type("L", (), {"warn": lambda self, *a, **k: None})()
+
+    started = time.monotonic()
+    motion.Motion._wait_for_exclusion_mask(Fake(), timeout_sec=1.0)
+    assert time.monotonic() - started < 0.2
+
+
+def test_wait_for_exclusion_mask_times_out_and_opens_anyway():
+    """감지가 끝내 안 오면(예: 이 컴포넌트가 화면에서 사라짐) 무한정 막지
+    않고 timeout 뒤에 그냥 게이트를 연다 — pick 자체는 곧 no_candidate 로
+    실패해서 다른 경로로 처리된다.
+    """
+    motion = pytest.importorskip(
+        "kit_robot.motion", reason="ROS 런타임 없음 (로봇/도커에서 실행)"
+    )
+
+    class Fake:
+        _octomap_exclusion_component = "양갱"
+        _latest_detection_masks = {}
+        logger = type("L", (), {"warn": lambda self, *a, **k: None})()
+
+    started = time.monotonic()
+    motion.Motion._wait_for_exclusion_mask(Fake(), timeout_sec=0.15)
+    elapsed = time.monotonic() - started
+    assert 0.1 <= elapsed < 1.0
