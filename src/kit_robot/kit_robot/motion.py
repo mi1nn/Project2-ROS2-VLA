@@ -898,13 +898,8 @@ class Motion:
             self.rg.close_gripper(force_val=grip_force)
             time.sleep(5.0)
 
-<<<<<<< HEAD
-            self.move_linear(pick_pose_up, vel=vel, acc=acc)
-            self.logger.info(f"gripper_width={gripper_width}")
-=======
             self.move_linear(pick_pose_up, vel=vel, acc=acc, avoid_collisions=False)
             time.sleep(1.0)
->>>>>>> 99298fa2ce224899839a871a086d491a56a7666b
 
             gripper_status = self.rg.get_status()
             grip_detected = bool(gripper_status[1])
@@ -1046,11 +1041,7 @@ class Motion:
         )
 
     def recover_to_safe_pose(self):
-<<<<<<< HEAD
-        self.logger.warning("Recovering from task failure")
-=======
         self.logger.warning("Recovering to safe pose")
->>>>>>> 99298fa2ce224899839a871a086d491a56a7666b
         self.rg.open_gripper()
         time.sleep(2.0)
         self.logger.info("Recovery complete; current robot pose is preserved")
