@@ -29,8 +29,10 @@ motion:
 
     # Octomap 게이트. eye-in-hand 라 팔이 움직이는 동안 쌓으면 voxel 이 번져서,
     # 카메라 포인트클라우드를 그대로 move_group 에 주지 않고 여기서 중계하며
-    # "관찰·검사 자세에 멈춰 있을 때만" 연다. 누적은 멈추지만 지도는 지우지 않고
-    # 다음 갱신까지 유지되므로, 픽·플레이스 전 구간에서 장애물 회피가 살아 있다.
+    # 멈춰 있을 때만 연다. 게이트가 열리는 건 작업당 두 번뿐이다: 키팅 트레이
+    # (inspection_pose) 1회, 홈 자세(observation_pose) 1회 장시간
+    # (controller.yaml: home_octomap_scan_sec). 그 뒤 Motion.freeze_octomap()
+    # 으로 지도를 잠그고, 픽·플레이스·최종 검사 전 구간이 그 지도만 본다.
     # cloud_out 은 sensors_3d.yaml 의 point_cloud_topic 과 반드시 같아야 한다.
     octomap:
       enabled: true
@@ -115,8 +117,11 @@ motion:
       joint_acceleration_scale: 0.15
 
     observation_pose:
+      # 홈 자세와 같은 값이다 — 관찰·octomap 촬영을 홈에서 한다. joint 타입이라
+      # MoveIt 에 JointConstraint 로 그대로 들어간다(IK·쿼터니언 변환 없음).
+      # 별도 항목으로 남겨둔 건 관찰 자세만 따로 재조정할 여지를 두기 위해서다.
       type: "joint"
-      pos: [0.0, 0.0, 60.0, 0.0, 120.0, 0.0]
+      pos: [0.0, 0.0, 90.0, 0.0, 90.0, 0.0]
 
       joint_vel: 30.0
       joint_acc: 60.0

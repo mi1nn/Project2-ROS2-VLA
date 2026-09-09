@@ -314,3 +314,48 @@ def test_wait_for_exclusion_mask_times_out_and_opens_anyway():
     motion.Motion._wait_for_exclusion_mask(Fake(), timeout_sec=0.15)
     elapsed = time.monotonic() - started
     assert 0.1 <= elapsed < 1.0
+
+
+def test_frozen_octomap_refuses_reopen_and_clear():
+    """확정된 지도는 어떤 호출자가 열려고/지우려고 해도 그대로 유지된다.
+
+    move_to_observation_pose·move_to_inspection_pose 는 각자 게이트를 다시
+    여는데, 작업당 두 번(트레이 + 홈 장시간) 찍고 잠근 뒤에는 그 호출들이
+    지도를 덮어써선 안 된다. 특히 clear 가 통과하면 확정 지도가 빈 지도가
+    되고 다시 채울 촬영 기회가 없어 전 구간이 장애물 없이 계획된다.
+    """
+    motion = pytest.importorskip(
+        "kit_robot.motion", reason="ROS 런타임 없음 (로봇/도커에서 실행)"
+    )
+
+    class FakeLogger:
+        def info(self, *args, **kwargs):
+            pass
+
+        warn = warning = info
+
+    class Fake:
+        octomap_enabled = True
+        octomap_cloud_in = "/in"
+        octomap_cloud_out = "/out"
+        _octomap_mapping = True
+        _octomap_frozen = False
+        logger = FakeLogger()
+
+        def set_octomap_mapping(self, enabled):
+            # freeze_octomap 이 내부에서 부르는 경로. 실제 구현을 태운다.
+            return motion.Motion.set_octomap_mapping(self, enabled)
+
+    fake = Fake()
+
+    # 잠그기 전: 정상적으로 열린다.
+    assert motion.Motion.set_octomap_mapping(fake, True) is True
+
+    motion.Motion.freeze_octomap(fake)
+    assert fake._octomap_frozen
+    assert fake._octomap_mapping is False, "확정 시 게이트가 닫혀야 한다"
+
+    # 잠근 뒤: 열기도 지우기도 거부된다.
+    assert motion.Motion.set_octomap_mapping(fake, True) is False
+    assert fake._octomap_mapping is False, "확정 지도에 새 프레임이 들어갔다"
+    assert motion.Motion.clear_octomap(fake) is False, "확정 지도가 지워졌다"
