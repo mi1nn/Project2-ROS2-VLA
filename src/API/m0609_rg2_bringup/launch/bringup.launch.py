@@ -308,6 +308,19 @@ def generate_launch_description():
             'decimation_filter.enable': True,
             'spatial_filter.enable': True,
             'temporal_filter.enable': True,
+            # 위 3개는 enable 만 켜둔 상태라 라이브러리 기본 강도(약함)로만
+            # 돌고 있었다 — 난사각(그레이징 앵글)에서 depth 가 양자화 계단으로
+            # 찍히는 건 기본 강도로는 안 지워진다. spatial 은 매그니튜드(반복
+            # 횟수)와 smooth_delta(이 값보다 작은 단차는 같은 면으로 보고
+            # 뭉갠다)를 올려 계단을 이어붙인다. temporal 은 프레임 간 평균을
+            # 더 강하게 걸어 같은 계단이 흔들리는 것도 누른다. decimation 은
+            # 해상도/정렬에 영향을 주므로 그대로(매그니튜드 기본값) 둔다.
+            'spatial_filter.filter_magnitude': 5.0,
+            'spatial_filter.filter_smooth_alpha': 0.25,
+            'spatial_filter.filter_smooth_delta': 30.0,
+            'spatial_filter.holes_fill': 2.0,
+            'temporal_filter.filter_smooth_alpha': 0.3,
+            'temporal_filter.filter_smooth_delta': 30.0,
             # rs_launch.py 는 IMU 를 기본 off 로 두지만 launch 를 우회하면 켜진 채
             # 뜨고, D435i 에서 "Motion Module failure" 하드웨어 에러를 뱉는다.
             # 이 파이프라인은 IMU 를 쓰지 않는다.
