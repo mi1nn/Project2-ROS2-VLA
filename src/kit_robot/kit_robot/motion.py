@@ -886,10 +886,22 @@ class Motion:
         )
 
         if self._octomap_exclusion_component is not None:
-            masking_maps = self._latest_detection_masks.get(
-                self._octomap_exclusion_component
+            # masking_maps는 신선도 체크 "뒤"에 읽어야 한다. motion.py는
+            # MultiThreadedExecutor(2 threads)로 돌아서 이 사이에
+            # _detection_callback이 다른 스레드에서 _latest_detection_masks를
+            # 통째로 교체할 수 있다 — 먼저 읽어두면 신선도 체크는 방금 갱신된
+            # (마스크 있음) 상태를 보고 통과시키는데 정작 쓰는 값은 그 전에
+            # 읽은 옛 스냅숏(None)이라 _mask_cloud_polygon이 None을 순회하며
+            # 죽는 경합이 생긴다.
+            fresh = (
+                self._has_fresh_exclusion_mask() and self._camera_intrinsics is not None
             )
-            if not self._has_fresh_exclusion_mask() or self._camera_intrinsics is None:
+            masking_maps = (
+                self._latest_detection_masks.get(self._octomap_exclusion_component)
+                if fresh
+                else None
+            )
+            if not masking_maps:
                 self.logger.warn(
                     "옥토맵 예외 미적용(디노이즈만 적용): "
                     f"component={self._octomap_exclusion_component}, "

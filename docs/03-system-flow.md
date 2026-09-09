@@ -376,6 +376,45 @@ Octomap 두 메서드는 Controller가 직접 부르지 않아도 된다. 지도
 고정(eye-to-hand) 카메라가 있어야 한다. 사람 쪽 차단은 octomap 이 아니라
 `default_keepout_box`(초록 벽)가 계속 담당한다.
 
+#### Octomap 노이즈·게이팅 튜닝 로그 (2026-09-09)
+
+voxel 크기와 게이트 타이밍은 실기 테스트로 여러 번 뒤집었다. 최종 값과 근거만 남긴다.
+
+- **voxel 크기는 0.01m 로 복귀.** 8mm→4mm→2mm 로 낮춰 파지 정밀도를 올리려 했으나,
+  D435 깊이 노이즈 바닥(작업 거리 30~70cm 에서 수 mm 요동)보다 voxel 이 잘게 썰리면서
+  평평한 테이블/트레이 표면이 울퉁불퉁하게 잡히는 문제가 심해져 10mm 로 되돌렸다
+  (`sensors_3d.yaml: octomap_resolution`). 물체 폭이 50~110mm(`grasp_params.json`)라
+  10mm 에서도 형태는 voxel 5~10개로 남는다 — 이 위로는 올리지 않는다.
+- **RealSense 후처리 필터를 depth 프레임 단계에서 켰다.** 평면 노이즈는 옥토맵/필터
+  코드가 아니라 raw depth 자체의 픽셀별 문제라 직접 스무딩 코드를 짜지 않고,
+  librealsense 의 decimation/spatial/temporal 필터를 `bringup.launch.py` 의
+  `realsense2_camera_node` 파라미터로 켰다.
+- **`_remove_outlier_points`(motion.py)가 flying pixel 을 거른다.** 물체 가장자리에서
+  튀는, 전경도 배경도 아닌 허공의 점은 옥토맵에 부분 삭제 API 가 없어 한 프레임만
+  섞여도 voxel 로 영구히 박힌다. 옥토맵으로 보내기 전에 격자 이웃 점 개수로 이상치를
+  거른다(`motion.yaml: octomap.denoise_voxel_size_m`/`denoise_min_neighbors`).
+- **`_flatten_floor_points` 가 그레이징 앵글 계단 노이즈를 편다.** 눕혀서 보는
+  각도에서는 depth 가 계단처럼 찍혀 위 디노이즈로 안 걸린다. base_frame 기준 가장
+  낮은 `flatten_floor_percentile` 번째 높이를 바닥으로 보고, `flatten_floor_band_m`
+  이내 점을 그 높이로 누른다. band_m 은 반드시 지금 집는 가장 낮은 물체(5cm대)보다
+  작게 잡는다 — 크면 그 물체까지 바닥으로 눌려 장애물로 안 잡힌다.
+- **예외 마스크가 같은 클래스 다중 인스턴스를 놓치던 버그를 고쳤다.** `_detection_callback`
+  이 `class_name` 하나에 인스턴스 여러 개를 마지막 것으로 덮어써서, pick 대상이 아닌
+  다른 인스턴스의 마스크만 옥토맵에서 빠지고 정작 집을 물체는 그대로 새고 있었다.
+  이제 같은 프레임에 잡힌 동일 `class_name` 인스턴스는 전부 모아 합집합으로
+  제외한다(`_mask_cloud_polygon` 이 단일 폴리곤 대신 폴리곤 리스트를 받도록 변경).
+- **게이트를 열기 전 첫 탐지를 기다린다.** 게이트가 열리자마자 첫 프레임이 중계되는데,
+  그 시점에 예외 대상 클래스의 탐지가 아직 한 번도 안 왔으면 무필터로 통과해 물체
+  voxel 이 영구히 박힌다. `move_to_observation_pose()` 가 게이트를 열기 직전
+  `_wait_for_exclusion_mask()` 로 최대 2초 대기한다. 끝내 안 오면 그냥 열고 넘어간다
+  — pick 은 곧 `no_candidate` 로 실패해 다른 경로를 탄다.
+- **self-filter 여유(`padding_offset`/`padding_scale`)는 낮추다 로봇이 멈춰서
+  되돌렸다.** 로봇 자신의 링크 형상을 얼마나 부풀려 self-filter 할지는 offset(덧연산)
+  + scale(곱연산) 두 값뿐이다. 둘 다 낮췄을 때 ACM 에서 일부러 뺀(회피 대상인)
+  팔뚝/손목이 자기 자신을 voxel 로 잡아 로봇이 멈춘 적이 있어, scale 은 1.3 을
+  유지하고 offset 만 0.002 로 낮췄다. 같은 증상이 재현되면 offset 을 0.02 로
+  되돌린다.
+
 동작 메서드는 완료 후 반환하며 수행 불가 시 예외를 발생시킨다. Controller는
 DSR·RG2를 직접 호출하거나 슬롯 좌표·파지 파라미터를 해석하지 않는다.
 기존 position_estimation이 적용하는 z_offset을 다시 적용하지 않는다.
