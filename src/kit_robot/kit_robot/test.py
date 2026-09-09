@@ -1,49 +1,32 @@
 import rclpy
-from rclpy.node import Node
+import DR_init
 
-from kit_robot.motion import Motion
+ROBOT_ID = "dsr01"
+ROBOT_MODEL = "m0609"
 
-
-INSPECTION_JOINT = [
-    -190.430,
-    6.440,
-    55.580,
-    0.33,
-    117.41,
-    -281.64,
-]
+DR_init.__dsr__id = ROBOT_ID
+DR_init.__dsr__model = ROBOT_MODEL
 
 
 def main(args=None):
     rclpy.init(args=args)
 
-    node = Node("inspection_pose_test")
-    motion = None
+    node = rclpy.create_node(
+        "current_pose_test",
+        namespace=ROBOT_ID
+    )
+
+    DR_init.__dsr__node = node
+
+    # 중요: node 설정 후 import
+    from DSR_ROBOT2 import get_current_posx
 
     try:
-        motion = Motion(node)
-
-        node.get_logger().info(
-            f"Move to inspection pose: {INSPECTION_JOINT}"
-        )
-
-        motion.move_joint(
-            INSPECTION_JOINT,
-            velocity_scale=0.15,
-            acceleration_scale=0.15,
-        )
-
-        node.get_logger().info(
-            "Inspection pose reached successfully."
-        )
-
-    except Exception as e:
-        node.get_logger().error(f"Move failed: {e}")
+        pos = get_current_posx()
+        print("Current TCP pose:")
+        print(pos)
 
     finally:
-        if motion is not None:
-            motion.shutdown()
-
         node.destroy_node()
         rclpy.shutdown()
 

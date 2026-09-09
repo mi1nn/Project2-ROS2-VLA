@@ -1,9 +1,5 @@
 motion:
   # MoveIt2 interface settings.
-  # Standard Doosan M0609 SRDF uses group=manipulator, base_link -> tool0.
-  # If m0609_rg2_moveit_config defines an RG2 TCP as the planning tip, change
-  # eef_link to that exact frame. This frame must also match the frame used by
-  # T_gripper2camera.npy hand-eye calibration.
   moveit:
     planning_group: "manipulator"
     base_frame: "base_link"
@@ -17,11 +13,19 @@ motion:
       - "joint_5"
       - "joint_6"
 
-    # Standard move_group capability names. If your launch namespaces move_group,
-    # change these to e.g. /dsr01/move_action, etc.
     move_group_action: "/dsr01/move_action"
     execute_trajectory_action: "/dsr01/execute_trajectory"
     cartesian_path_service: "/dsr01/compute_cartesian_path"
+    apply_planning_scene_service: "/dsr01/apply_planning_scene"
+
+    default_keepout_box:
+      enabled: true
+      id: "base_keepout_box"
+
+      min_cm: [-200.0, 40.0, -100.0]
+      max_cm: [200.0, 100.0, 600.0]
+
+      marker_topic: "/kit_robot/default_keepout_box_marker"
 
     server_ready_timeout_sec: 15.0
     motion_timeout_sec: 60.0
@@ -34,49 +38,50 @@ motion:
 
     joint_tolerance_deg: 0.5
 
-    # DSR movej used absolute deg/s and deg/s^2. MoveIt planning uses scaling
-    # factors against joint_limits.yaml, so these values are the MoveIt equivalent
-    # knobs. 0.15 is intentionally conservative for the initial real-robot test.
     default_joint_velocity_scale: 0.15
     default_joint_acceleration_scale: 0.15
 
-    # DSR movel replacement: /compute_cartesian_path -> /execute_trajectory.
     cartesian_max_step_m: 0.005
     cartesian_min_fraction: 0.999
     cartesian_jump_threshold: 0.0
     cartesian_prismatic_jump_threshold: 0.0
     cartesian_revolute_jump_threshold: 0.0
 
-    # GetCartesianPath accepts absolute max Cartesian speed, so vel=80 means
-    # 80 mm/s -> 0.08 m/s. It accepts acceleration only as a joint scaling factor;
-    # this reference maps acc=160 mm/s^2 to 0.16 for the initial tuning.
     cartesian_acc_reference_mm_s2: 1000.0
 
   positions:
     home:
       type: "joint"
       pos: [0.0, 0.0, 90.0, 0.0, 90.0, 0.0]
-      # Existing DSR values are retained as documentation.
+
       joint_vel: 30.0
       joint_acc: 60.0
+
       joint_velocity_scale: 0.15
       joint_acceleration_scale: 0.15
 
     observation_pose:
       type: "joint"
       pos: [0.0, 0.0, 60.0, 0.0, 120.0, 0.0]
+
       joint_vel: 30.0
       joint_acc: 60.0
+
       joint_velocity_scale: 0.15
       joint_acceleration_scale: 0.15
 
     inspection_pose:
-      type: "joint"
-      pos: [173.0, 7.0, 54.0, 0.0, 117.0, 80.0]
-      joint_vel: 30.0
-      joint_acc: 60.0
+      type: "cartesian"
+
+      # [x_mm, y_mm, z_mm, A_deg, B_deg, C_deg]
+      # intrinsic ZYZ Euler
+      pos: [-382.990, 45.070, 398.620, 13.30, -177.59, -78.66]
+
       joint_velocity_scale: 0.15
       joint_acceleration_scale: 0.15
+
+      position_tolerance_mm: 2.0
+      orientation_tolerance_deg: 2.0
 
   place:
     linear_vel: 60.0

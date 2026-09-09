@@ -11,18 +11,22 @@ from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import Pose
 from moveit_msgs.action import ExecuteTrajectory, MoveGroup
 from moveit_msgs.msg import (
+    CollisionObject,
     Constraints,
     JointConstraint,
     MoveItErrorCodes,
     OrientationConstraint,
+    PlanningScene,
     PositionConstraint,
 )
-from shape_msgs.msg import SolidPrimitive
-from moveit_msgs.srv import GetCartesianPath
+from moveit_msgs.srv import ApplyPlanningScene, GetCartesianPath
 from rclpy.action import ActionClient
 from rclpy.duration import Duration
 from rclpy.executors import MultiThreadedExecutor
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
+from shape_msgs.msg import SolidPrimitive
+from visualization_msgs.msg import Marker
 from scipy.spatial.transform import Rotation
 from tf2_ros import Buffer, TransformListener
 
@@ -90,6 +94,29 @@ class Motion:
         )
         self.cartesian_service_name = self.moveit_config.get(
             "cartesian_path_service", "/compute_cartesian_path"
+        )
+        self.apply_planning_scene_service_name = self.moveit_config.get(
+            "apply_planning_scene_service", "/dsr01/apply_planning_scene"
+        )
+
+        # Fixed keepout box. Bounds are configured in centimeters and converted
+        # to meters only when messages are sent to MoveIt/RViz. Other Motion pose
+        # APIs remain millimeter-based for compatibility with the existing project.
+        self.keepout_config = self.moveit_config.get("default_keepout_box", {})
+        self.keepout_enabled = bool(self.keepout_config.get("enabled", True))
+        self.keepout_object_id = str(
+            self.keepout_config.get("id", "base_keepout_box")
+        )
+        self.keepout_min_cm = list(
+            self.keepout_config.get("min_cm", [-200.0, 40.0, -100.0])
+        )
+        self.keepout_max_cm = list(
+            self.keepout_config.get("max_cm", [200.0, 100.0, 600.0])
+        )
+        self.keepout_marker_topic = str(
+            self.keepout_config.get(
+                "marker_topic", "/kit_robot/default_keepout_box_marker"
+            )
         )
 
         self.server_timeout = float(
@@ -164,6 +191,16 @@ class Motion:
         self._cartesian_client = self._moveit_node.create_client(
             GetCartesianPath, self.cartesian_service_name
         )
+        self._apply_planning_scene_client = self._moveit_node.create_client(
+            ApplyPlanningScene, self.apply_planning_scene_service_name
+        )
+
+        marker_qos = QoSProfile(depth=1)
+        marker_qos.reliability = ReliabilityPolicy.RELIABLE
+        marker_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+        self._keepout_marker_pub = self._moveit_node.create_publisher(
+            Marker, self.keepout_marker_topic, marker_qos
+        )
 
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(
@@ -173,6 +210,7 @@ class Motion:
         self.rg = RG("rg2", "192.168.1.1", 502)
 
         self._wait_for_moveit_servers()
+        self._add_default_keepout_box()
         self.logger.info(
             "MoveIt2 Motion initialized: "
             f"group={self.group_name}, base={self.base_frame}, eef={self.eef_link}"
@@ -201,6 +239,13 @@ class Motion:
         if not self._cartesian_client.wait_for_service(timeout_sec=self.server_timeout):
             raise RuntimeError(
                 f"GetCartesianPath service unavailable: {self.cartesian_service_name}"
+            )
+        if self.keepout_enabled and not self._apply_planning_scene_client.wait_for_service(
+            timeout_sec=self.server_timeout
+        ):
+            raise RuntimeError(
+                "ApplyPlanningScene service unavailable: "
+                f"{self.apply_planning_scene_service_name}"
             )
 
     def _wait_future(self, future, timeout_sec, description):
@@ -256,6 +301,126 @@ class Motion:
             "joint_acceleration_scale", self.default_joint_acceleration_scale
         )
         return self._clamp_scale(vel_scale), self._clamp_scale(acc_scale)
+
+    @staticmethod
+    def _validate_keepout_bounds(min_cm, max_cm):
+        if len(min_cm) != 3 or len(max_cm) != 3:
+            raise ValueError(
+                "default_keepout_box min_cm/max_cm must contain [x, y, z]"
+            )
+
+        min_values = [float(v) for v in min_cm]
+        max_values = [float(v) for v in max_cm]
+
+        if not all(math.isfinite(v) for v in min_values + max_values):
+            raise ValueError("default_keepout_box contains non-finite values")
+
+        for axis, low, high in zip("xyz", min_values, max_values):
+            if high <= low:
+                raise ValueError(
+                    f"default_keepout_box max_{axis} must be greater than min_{axis}"
+                )
+
+        return min_values, max_values
+
+    def _keepout_geometry_m(self):
+        min_cm, max_cm = self._validate_keepout_bounds(
+            self.keepout_min_cm, self.keepout_max_cm
+        )
+
+        # cm -> m
+        center_m = [
+            (low + high) * 0.5 / 100.0
+            for low, high in zip(min_cm, max_cm)
+        ]
+        size_m = [
+            (high - low) / 100.0
+            for low, high in zip(min_cm, max_cm)
+        ]
+        return min_cm, max_cm, center_m, size_m
+
+    def _publish_keepout_marker(self, center_m, size_m):
+        marker = Marker()
+        marker.header.frame_id = self.base_frame
+        marker.header.stamp = self._moveit_node.get_clock().now().to_msg()
+        marker.ns = "kit_robot_keepout"
+        marker.id = 0
+        marker.type = Marker.CUBE
+        marker.action = Marker.ADD
+
+        marker.pose.position.x = center_m[0]
+        marker.pose.position.y = center_m[1]
+        marker.pose.position.z = center_m[2]
+        marker.pose.orientation.w = 1.0
+
+        marker.scale.x = size_m[0]
+        marker.scale.y = size_m[1]
+        marker.scale.z = size_m[2]
+
+        # Semi-transparent red keepout visualization in RViz.
+        marker.color.r = 1.0
+        marker.color.g = 0.0
+        marker.color.b = 0.0
+        marker.color.a = 0.30
+
+        self._keepout_marker_pub.publish(marker)
+
+    def _add_default_keepout_box(self):
+        if not self.keepout_enabled:
+            self.logger.info("Default keepout box disabled")
+            return False
+
+        min_cm, max_cm, center_m, size_m = self._keepout_geometry_m()
+
+        collision = CollisionObject()
+        collision.header.frame_id = self.base_frame
+        collision.header.stamp = self._moveit_node.get_clock().now().to_msg()
+        collision.id = self.keepout_object_id
+        collision.operation = CollisionObject.ADD
+
+        box = SolidPrimitive()
+        box.type = SolidPrimitive.BOX
+        box.dimensions = list(size_m)
+
+        box_pose = Pose()
+        box_pose.position.x = center_m[0]
+        box_pose.position.y = center_m[1]
+        box_pose.position.z = center_m[2]
+        box_pose.orientation.w = 1.0
+
+        collision.primitives = [box]
+        collision.primitive_poses = [box_pose]
+
+        scene = PlanningScene()
+        scene.is_diff = True
+        scene.world.collision_objects = [collision]
+
+        request = ApplyPlanningScene.Request()
+        request.scene = scene
+        future = self._apply_planning_scene_client.call_async(request)
+        response = self._wait_future(
+            future,
+            self.server_timeout,
+            "ApplyPlanningScene(default_keepout_box)",
+        )
+
+        if response is None or not response.success:
+            raise RuntimeError("Failed to add default keepout box")
+
+        self._publish_keepout_marker(center_m, size_m)
+
+        center_cm = [value * 100.0 for value in center_m]
+        size_cm = [value * 100.0 for value in size_m]
+        self.logger.info(
+            "Default keepout box added: "
+            f"id={self.keepout_object_id}, "
+            f"frame={self.base_frame}, "
+            f"min_cm={min_cm}, max_cm={max_cm}, "
+            f"center_cm={[round(v, 3) for v in center_cm]}, "
+            f"size_cm={[round(v, 3) for v in size_cm]}, "
+            f"marker_topic={self.keepout_marker_topic}"
+        )
+        return True
 
     # ------------------------------------------------------------------
     # MoveIt joint planning (replacement for movej)
@@ -348,26 +513,78 @@ class Motion:
             )
         return 0
 
-    def move_home(self):
-        config = self.positions["home"]
-        if config["type"] != "joint":
-            raise TypeError("home position must be 'joint'")
+    def _move_named_position(self, name):
+        """Move to a named position from motion.yaml.
+
+        Supported types:
+          - joint: [j1, j2, j3, j4, j5, j6] in degrees
+          - cartesian/pose: [x_mm, y_mm, z_mm, A_deg, B_deg, C_deg]
+            where A/B/C use the Doosan-compatible intrinsic ZYZ Euler convention.
+        """
+        if name not in self.positions:
+            raise KeyError(f"Unknown named position: {name}")
+
+        config = self.positions[name]
+        pose_type = str(config.get("type", "")).strip().lower()
+        target = list(config.get("pos", []))
         vel_scale, acc_scale = self._joint_scales(config)
-        return self.move_joint(config["pos"], vel_scale, acc_scale)
+
+        if pose_type == "joint":
+            if len(target) != len(self.joint_names):
+                raise ValueError(
+                    f"{name}.pos must contain {len(self.joint_names)} joint values"
+                )
+
+            self.logger.info(
+                f"Move named position '{name}' as joint target: {target}"
+            )
+            return self.move_joint(
+                target,
+                velocity_scale=vel_scale,
+                acceleration_scale=acc_scale,
+            )
+
+        if pose_type in ("cartesian", "pose"):
+            if len(target) != 6:
+                raise ValueError(
+                    f"{name}.pos must be "
+                    "[x_mm, y_mm, z_mm, A_deg, B_deg, C_deg]"
+                )
+
+            position_tolerance_mm = float(
+                config.get("position_tolerance_mm", 2.0)
+            )
+            orientation_tolerance_deg = float(
+                config.get("orientation_tolerance_deg", 2.0)
+            )
+
+            self.logger.info(
+                f"Move named position '{name}' as Cartesian target: {target}, "
+                f"position_tolerance={position_tolerance_mm:.2f} mm, "
+                f"orientation_tolerance={orientation_tolerance_deg:.2f} deg"
+            )
+
+            return self.move_pose(
+                target,
+                velocity_scale=vel_scale,
+                acceleration_scale=acc_scale,
+                position_tolerance_mm=position_tolerance_mm,
+                orientation_tolerance_deg=orientation_tolerance_deg,
+            )
+
+        raise ValueError(
+            f"Unsupported position type for '{name}': {pose_type!r}. "
+            "Expected 'joint' or 'cartesian'."
+        )
+
+    def move_home(self):
+        return self._move_named_position("home")
 
     def move_to_observation_pose(self):
-        config = self.positions["observation_pose"]
-        if config["type"] != "joint":
-            raise TypeError("observation_pose must be 'joint'")
-        vel_scale, acc_scale = self._joint_scales(config)
-        return self.move_joint(config["pos"], vel_scale, acc_scale)
+        return self._move_named_position("observation_pose")
 
     def move_to_inspection_pose(self):
-        config = self.positions["inspection_pose"]
-        if config["type"] != "joint":
-            raise TypeError("inspection_pose must be 'joint'")
-        vel_scale, acc_scale = self._joint_scales(config)
-        return self.move_joint(config["pos"], vel_scale, acc_scale)
+        return self._move_named_position("inspection_pose")
 
     # ------------------------------------------------------------------
     # Current TCP pose: keep old DSR posx-compatible mm + ZYZ-degree format
@@ -557,7 +774,7 @@ class Motion:
     # Cartesian straight-line planning (replacement for movel)
     # ------------------------------------------------------------------
 
-    def move_linear(self, target_pose, vel=100, acc=200, avoid_collisions=False):
+    def move_linear(self, target_pose, vel=100, acc=200, avoid_collisions=True):
         if vel <= 0 or acc <= 0:
             raise ValueError("vel and acc must be positive")
 
@@ -682,7 +899,7 @@ class Motion:
             time.sleep(5.0)
             gripper_width = self.rg.get_width()
 
-            self.move_linear(pick_pose_up, vel=vel, acc=acc, avoid_collisions=False)
+            self.move_linear(pick_pose_up, vel=vel, acc=acc)
             self.logger.info(f"gripper_width={gripper_width}")
 
             if gripper_width > 13:
@@ -819,14 +1036,11 @@ class Motion:
             f"Complete place: {component_name} -> {slot_name}"
         )
 
-        def recover_to_safe_pose(self):
-            self.logger.warning("Recovering to safe pose")
+    def recover_to_safe_pose(self):
+        self.logger.warning("Recovering from task failure")
         self.rg.open_gripper()
         time.sleep(2.0)
-        result = self.move_home()
-        if result != 0:
-            raise RuntimeError(f"Failed to recover home: result={result}")
-        self.logger.info("Complete recovery to safe pose")
+        self.logger.info("Recovery complete; current robot pose is preserved")
 
     def shutdown(self):
         """Stop the private MoveIt executor/node before rclpy.shutdown()."""
