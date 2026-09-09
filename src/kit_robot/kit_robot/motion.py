@@ -55,8 +55,8 @@ class Motion:
 
         # DSR_ROBOT2는 서비스 이름을 자기 노드 네임스페이스 기준 상대경로로 연다
         # (예: "dsr_controller2/motion/move_joint").  robot_id는 서비스 이름에
-        # 안 들어가므로, Controller 노드(네임스페이스 없음)를 그대로 넘기면
-        # /dsr01/dsr_controller2/... 를 못 찾고 영원히 대기한다.
+        # 안 들어가므로 Controller 설정에 기대지 않고, /dsr01 아래에서 동작할
+        # 전용 인터페이스 노드를 명시적으로 만든다.
         # 레퍼런스(robot_control.py)처럼 namespace=ROBOT_ID인 전용 노드를 따로 둔다.
         # DSR_ROBOT2는 import 시점에 DR_init.__dsr__node로 서비스 client를 만들기
         # 때문에 import 전에 반드시 설정해야 한다.
@@ -189,9 +189,9 @@ class Motion:
             self.rg.close_gripper(force_val=grip_force)
             self.wait(5.0)
 
-            gripper_width = self.rg.get_width()
-
             self.move_linear(pick_pose_up, vel=vel, acc=acc)
+            self.wait(1.0)
+            gripper_width = self.rg.get_width()
             print(f'gripper_width: {gripper_width}')
 
             if gripper_width > 13:

@@ -33,4 +33,4 @@
     inspection_settle_sec: 4.0
 
     # 재시도 시도
-    max_attemps: 3
+    max_attempts: 3

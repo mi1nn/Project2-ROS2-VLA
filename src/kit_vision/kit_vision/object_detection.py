@@ -185,8 +185,8 @@ class ObjectDetectionNode(ImgNode):
         callback은 최신 ROS 메시지 참조만 저장한다.
 
     inference worker:
-        인위적인 0.3초 주기가 없다.
-        YOLO 처리가 끝나는 즉시 그 시점의 최신 프레임을 가져간다.
+        YOLO 처리가 끝난 뒤 최소 MIN_CYCLE_SEC(기본 0.3초) 주기를 지키고,
+        다음 추론을 시작할 때 그 시점의 최신 프레임을 가져간다.
 
     예:
         YOLO가 frame 1을 처리하는 동안

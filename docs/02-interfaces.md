@@ -4,6 +4,8 @@
 
 이 문서가 팀 간 유일한 공식 계약이다. 노드 내부 구현은 각자 자유지만, 여기 정의된 srv/msg 를 우회해서 남의 패키지 코드를 직접 import 하지 않는다.
 
+본문의 `reference/` 경로는 구현 당시 참고한 외부 자료의 출처 기록이다. 해당 디렉터리는 현재 브랜치에 포함되어 있지 않으므로 실행 경로로 사용하지 않는다.
+
 **변경 절차:** srv/msg 수정은 전원 재빌드를 유발한다. Day 1 에 확정하고, 이후 변경은 팀 전체 합의 후 이 문서를 먼저 고친 다음 코드를 고친다.
 
 ---
@@ -98,16 +100,16 @@ float64[] depth_position
 
 ```
 # 검출된 물체 하나. 좌표계는 카메라 기준, 단위 mm.
-string     class_name      # class_names.json 의 이름. 예: "cup_ramen"
+string     class_name      # class_names.json 의 이름. 예: "컵라면"
 float32    score           # 0.0 ~ 1.0
 float64[3] camera_xyz      # 카메라 좌표계 (x, y, z), mm
 float64[]  masking_map     # polygon 마스킹맵
 int32[2]   centroid_px     # seg mask 무게중심 픽셀 (x, y). 로깅/디버깅용
 ```
 
-**`camera_xyz` 까지 `object_detection` 이 채운다.** 픽셀만 발행하고 좌표 변환을 나중에 하는 방식도 가능하지만, 그러면 color 프레임(mask)과 depth 프레임의 시각 동기를 `message_filters` 로 따로 맞춰야 한다. `object_detection` 노드 하나만이 color·depth·camera_info 를 **모두** 갖고 있으므로, 여기서 역투영까지 끝내면 세 프레임의 동기가 자동으로 맞는다. 동기화 코드를 아예 안 쓰는 게 가장 확실하다.
+**`camera_xyz`까지 `object_detection`이 채운다.** `ImgNode`는 최신 color와 depth 메시지를 각각 캐시한 뒤 두 stamp의 차이가 `max_sync_delta_sec` 이하일 때만 한 쌍으로 사용한다. 기본 허용 차이는 0.05초다. 이는 `message_filters`를 이용한 정확한 동기화가 아니라 최신 메시지 사이의 시간 차이를 검사하는 근사 방식이며, camera_info는 가장 최근 값을 별도로 사용한다.
 
-객체탐지를 진행해서 얻은 polygon 마스킹맵을 받아 가장 짧은 파지 거리를 측정한다.
+polygon 마스킹맵은 `position_estimation`에서 최소 외접 사각형의 짧은 변 방향을 계산해 그리퍼의 `rz`를 정하는 데 사용한다.
 
 
 ### 2.3 `msg/DetectionArray.msg` → 토픽 `/detection/objects`
@@ -165,7 +167,7 @@ string         error_code       # 아래 표 참조
 
 request 로 넘기면 `position_estimation` 은 로봇 API 를 전혀 import 하지 않는 **순수 계산 노드**가 된다. DR_init 충돌이 원천적으로 없고, 로봇 없이 단위 검증이 가능하다.
 
-> Day 1 에 `ros2 topic list | grep dsr` 로 상태 토픽 존재를 확인한다. 있으면 position_estimation 이 구독하고 `robot_posx` 는 오버라이드용으로 남는다. **어느 쪽이든 계약은 그대로**라 팀 재빌드가 발생하지 않는다.
+> 현재 `position_estimation`은 DSR 상태 토픽이나 TF를 구독하지 않는다. `robot_posx`는 항상 Controller가 `GetComponentPose` 요청에 담아 전달한다. `ros2 topic list | grep dsr`는 드라이버 상태를 확인하는 진단 명령일 뿐 현재 좌표 계산 입력 경로를 바꾸지 않는다.
 
 ### 2.6 최신성 가드 — 생략 불가
 
@@ -179,11 +181,11 @@ eye-in-hand 구성에서 가장 위험한 실패다. position_estimation 이 들
 
 Controller는 error_code=stale로 좌표 검출 노후를 처리한다. 검사 서비스의 detection_age만 검사 JSON에 기록한다.
 
-**Controller 초기 정책:** max_age_sec=1.0, 관찰·검사 정착 대기 1.2초를 사용한다.
+Controller 코드 기본값은 `max_age_sec=1.0`, 관찰·검사 정착 대기 `1.2초`다.
+제공되는 `resource/controller.yaml`을 적용하면 `max_age_sec=3.0`, 관찰·검사 정착 대기 `4.0초`가 된다.
 정착 시작은 자세 이동 완료 시점이며 응답을 받을 때까지 해당 자세를 유지한다.
-검출 stamp와 서버 시각이 동일 시간 기준이고 이동 완료 시점을 정확히 안다는 전제다.
-호스트 간 시계 오차도 0.2초 여유 이내여야 한다. 미래 stamp·시계 불일치 방어가 완료되었다고
-가정하지 않는다. 정착 시간이 허용 검출 나이보다 길도록 함께 조정하고 실기에서 검증한다.
+검출 stamp와 서버 시각이 같은 시간 기준이라는 전제이며, 미래 stamp와 시계 불일치 방어는 구현되어 있지 않다.
+정착 시간이 허용 검출 나이보다 길도록 함께 조정하고 실기에서 검증한다.
 
 현재 서버는 촬영 시각 하한 요청이나 새 프레임 대기 기능 없이 캐시를 즉시 판정한다.
 초기 Controller는 exclude_taken=[]를 보낸다. 기존 제외 키는 픽셀 중심 문자열이므로
@@ -225,7 +227,7 @@ expected_classes와 expected_counts는 원래 검증된 명령에서 동일 순�
 
 ## 3. 음성 ↔ 로봇
 
-### 3.1 `srv/GetCommand.srv` → `command_node` 가 서버
+### 3.1 `srv/GetCommand.srv` → `get_command` 실행 파일의 `get_command_node`가 서버
 
 ```
 string task_id   # 작업 1회 식별자. controller 가 생성해 요청에 담는다.
@@ -237,12 +239,11 @@ string error_code
 
 레퍼런스가 `std_srvs/Trigger` 를 쓰던 자리인데, 응답 구조가 달라서 전용 srv 로 만든다.
 
-**`task_id`.** MongoDB `commands`/`kit_executions`/`component_executions` 세 컬렉션을 하나의
-작업으로 묶는 키다([05 데이터베이스](05-database.md) ID 체계). `controller` 가
-`IDLE → LISTEN` 진입 시(이 서비스를 호출하는 유일한 지점) 생성해서 요청에 실어 보낸다.
-`command_node` 는 응답과 `/kit/command_result`에 이 값을 그대로 사용하므로, 이후 DB 기록
-단계에서 재발급하지 않고 요청 시점의 값을 계속 쓴다. `command_json` 내부에는 실행 명령인
-`kit_type`과 `items`만 넣고, `task_id`와 `raw_text`는 `CommandResult`의 별도 필드로 전달한다.
+**`task_id`.** MongoDB `commands`/`kit_executions`/`component_executions` 세 컬렉션을 하나의 작업으로 묶는 키다([05 데이터베이스](05-database.md) ID 체계).
+`controller`가 `IDLE → LISTEN` 진입 시 생성해 요청에 넣는다.
+`GetCommand` 응답 자체에는 `task_id` 필드가 없다.
+현재 `get_command` 노드는 서비스 응답의 `command_json`에 과도기 메타데이터로 `task_id`와 `raw_text`를 추가하고, `CommandResult.task_id`에도 요청의 값을 사용한다.
+DB로 발행하는 `CommandResult.command_json`에는 `kit_type`과 `items`만 남긴다.
 
 **웨이크워드 감지 범위 — 현재 구현 확인.** get_command 콜백 내부에서 마이크를 열어 최대 30초 동안 웨이크워드를 기다린 뒤 닫는다. Controller는 LISTEN에서 요청을 하나만 보낸다. 클라이언트 timeout은 서버 콜백 취소를 뜻하지 않으므로 아래 재시작 정책을 따른다.
 
@@ -253,10 +254,10 @@ string error_code
 
 ```json
 {
-  "kit_type": "earthquake",
+  "kit_type": "지진대응키트",
   "items": [
-    {"name": "cup_ramen", "qty": 2},
-    {"name": "mask",      "qty": 1}
+    {"name": "컵라면", "qty": 2},
+    {"name": "마스크", "qty": 1}
   ]
 }
 ```
@@ -269,7 +270,7 @@ string error_code
 **현재 구현과 예정 변경:** 현재 음성 노드는 command_json에 raw_text와 task_id도 넣는다.
 이는 위 목표 계약과 다른 과도기 구현이며 해당 필드를 빼는 수정은 음성 노드에서 추후 진행한다.
 그 전까지 Controller는 kit_type/items를 검증하고 추가 메타데이터는 실행 해석에서 무시한다.
-응답 task_id로 Controller가 생성한 task_id를 덮어쓰지 않는다. 이번 수정에서는 음성 코드를 변경하지 않는다.
+응답의 메타데이터로 Controller가 생성한 task_id를 덮어쓰지 않는다. 메타데이터 제거는 후속 작업이다.
 
 **`error_code`** (success=false 일 때):
 
@@ -301,7 +302,9 @@ DB 노드는 아래 세 토픽을 구독한다. MongoDB 필드 매핑, 검증 �
 
 ### 4.1 `msg/CommandResult.msg` (음성 → DB)
 
-아래는 목표 발행 계약이다. 현재 get_keyword.py의 서비스 응답은 구현되어 있으나 CommandResult publisher 연결은 후속 작업이다. Controller의 결과 토픽 두 개는 발행 구현이 되어 있다.
+`get_keyword.py`에는 `CommandResult` publisher와 `/kit/command_result` 발행 함수가 연결되어 있다.
+다만 현재는 일부 실패 분기에서 발행 함수를 호출하지 않으므로 모든 성공·실패를 기록한다는 계약은 아직 완전히 충족하지 않는다.
+Controller의 `TaskStatus`와 `ComponentResult` 발행도 구현되어 있다.
 
 ```
 string task_id
@@ -314,8 +317,9 @@ string detail
 builtin_interfaces/Time stamp
 ```
 
-토픽은 `/kit/command_result`다. 명령 해석과 검증이 끝날 때 성공·실패 모두 발행한다.
-성공 시 `command_json`은 비어 있지 않은 JSON 객체여야 한다.
+토픽은 `/kit/command_result`다. 현재 구현은 성공, `wakeword_timeout`, 일반 STT 예외에서 발행한다.
+오디오 스트림 열기 실패, STT·LLM의 `RateLimitError`, `invalid_command`, 기타 OpenAI 예외 경로는 서비스 실패 응답만 반환하고 토픽은 발행하지 않는다.
+성공 메시지의 `command_json`은 비어 있지 않은 JSON 객체다.
 
 ### 4.2 `msg/TaskStatus.msg` (로봇 → DB/UI)
 
@@ -385,22 +389,23 @@ TASK_FATAL로 미시작한 Component는 SKIPPED로 발행하며 시작·종료 �
 ros2 interface show kit_interfaces/srv/GetComponentPose
 ros2 interface show kit_interfaces/msg/DetectionArray
 
-# 검출 토픽 관찰 (mock 발행 중이어도 보인다)
+# 실제 object_detection 실행 중 검출 토픽 관찰
 ros2 topic echo /detection/objects
 ros2 topic hz   /detection/objects
 
-# 좌표 서비스 왕복 시험 (Day 2)
+# 최신 검출이 캐시된 상태에서 좌표 서비스 왕복 시험
 ros2 service call /get_component_pose kit_interfaces/srv/GetComponentPose \
-  "{component: 'cup_ramen', robot_posx: [400,0,400,0,180,0], max_age_sec: 1.0}"
-ros2 service call /get_command kit_interfaces/srv/GetCommand "{task_id: 'TASK-20260905T053012123456Z'}"
+  "{component: '컵라면', robot_posx: [400,0,400,0,180,0], max_age_sec: 1.0}"
+ros2 service call /get_command kit_interfaces/srv/GetCommand \
+  "{task_id: 'TASK-20260905T053012123456Z'}"
 
 # 상태 발행 확인
 ros2 topic echo /kit/task_status
 ros2 topic echo /kit/command_result
 ros2 topic echo /kit/component_result
 
-# Day 1 확인 항목: 로봇 상태 토픽이 실제로 있는지 (2.5절)
+# 선택 진단: DSR 토픽 확인. 현재 position_estimation은 이 토픽을 구독하지 않는다.
 ros2 topic list | grep dsr
 ```
 
-Day 2 에 `object_detection` 이 고정 `DetectionArray` 를 발행하는 mock 부터 만드는 이유가 이것이다. YOLO 모델이 나오기 전에 계약과 `position_estimation` 결선을 먼저 끝내둔다.
+현재 브랜치에는 고정 `DetectionArray`를 발행하는 mock 노드가 없다. ROS 서비스 결선을 시험하려면 실제 `object_detection`을 실행하거나 계약에 맞는 `DetectionArray` 메시지를 별도로 발행해야 한다.

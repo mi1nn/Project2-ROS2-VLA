@@ -5,14 +5,15 @@
 ## 1. 현재 구현 범위
 
 Controller는 명령 수신 → 검증·슬롯 배정 → 관찰·좌표 요청 → 파지·배치 → 검사 → 복귀·최종 발행을 처리한다.
-현재 `main()`은 `Controller(motion=MotionDemo())`로 실행한다. 실제 로봇 동작은 연결하지 않았다.
+현재 `main()`은 `Controller()`를 생성한 뒤 `node.motion = Motion(node)`로 실제 로봇 제어 객체를 연결하고, `spin_once()`와 `timer_tick()`을 반복한다.
 
 | 파일 | 역할 |
 | --- | --- |
 | `kit_robot/controller.py` | 상태 전이, 서비스 client, Motion 호출, 재시도·종료, 토픽 발행 |
 | `kit_robot/controller_model.py` | ROS 없는 명령 검증, Component·Attempt, 슬롯 할당·기대 수량 |
-| `kit_robot/motion_demo.py` | Motion 메서드 7개의 호출 로그와 성공 반환 |
-| `kit_robot/controller_demo_services.py` | 명령·좌표·검사 서비스의 성공 응답 |
+| `kit_robot/motion.py` | DSR_ROBOT2와 RG2를 이용한 실제 이동·파지·배치 |
+| `config/motion.yaml` | 홈·관찰·검사 자세와 슬롯 배치 좌표 |
+| `resource/grasp_params.json` | 품목별 그리퍼 폭·힘·접근 높이·Z 오프셋 |
 | `resource/controller.yaml` | 지원 품목, 공용 슬롯, 서비스 대기·정착 파라미터 |
 | `test/test_controller_model.py` | 모델 단위 테스트 7개 |
 
@@ -28,24 +29,29 @@ ROS 파라미터는 YAML 또는 CLI로 덮어쓸 수 있다. YAML은 resource �
 | `slot_names` | 기본 목록 없음, 필수 | slot_1~slot_6 | 품목별 전용 구분 없는 공용 배치 순서 |
 | `service_ready_timeout_sec` | 20초 | 20초 | 각 서비스 준비 대기 제한 |
 | `command_timeout_sec` | 60초 | 60초 | 명령 요청부터 음성·STT·LLM 응답까지 |
-| `pose_timeout_sec` | 5초 | 10초 | 좌표 요청 후 응답 제한 |
-| `max_age_sec` | 1초 | 1초 | 좌표·검사 검출의 허용 나이 |
-| `observation_settle_sec` | 1.2초 | 1.2초 | 관찰 이동 완료 후 정착 |
-| `max_attempts` | 2회 | 미지정, 코드 기본값 | 최초 시도를 포함한 Component 시도 상한 |
-| `inspect_timeout_sec` | 5초 | 5초 | 검사 요청 후 응답 제한 |
-| `inspection_settle_sec` | 1.2초 | 1.2초 | 검사 이동 완료 후 정착 |
-| `restart_delay_sec` | 5초 | 미지정, 코드 기본값 | 최종 발행 후 다음 작업까지의 간격 |
+| `pose_timeout_sec` | 5초 | 15초 | 좌표 요청 후 응답 제한 |
+| `max_age_sec` | 1초 | 3초 | 좌표·검사 검출의 허용 나이 |
+| `observation_settle_sec` | 1.2초 | 4초 | 관찰 이동 완료 후 정착 |
+| `max_attempts` | 2회 | 3회 | 최초 시도를 포함한 논리적 Component 시도 상한 |
+| `inspect_timeout_sec` | 5초 | 10초 | 검사 요청 후 응답 제한 |
+| `inspection_settle_sec` | 1.2초 | 4초 | 검사 이동 완료 후 정착 |
+| `restart_delay_sec` | 5초 | 미지정, 코드 기본값 | 최종 발행 후 다음 작업까지의 간격. 07 시나리오는 CLI로 60초 적용 |
 
-timer 주기는 코드에 0.1초로 고정되어 있다. 동기 Motion 호출 중 같은 주기의 tick이 보장되지는 않는다.
+현재 ROS timer는 생성하지 않는다. `main()`이 `spin_once(node, timeout_sec=0.1)` 뒤 `timer_tick()`을 직접 호출하므로 동기 Motion 실행 시간만큼 다음 tick이 지연된다.
 timeout은 실측 전 설정이다. 정착 시간은 max_age_sec보다 길어야 하며 시계 일치·촬영 지연도 실제 환경에서 확인한다.
 
 중복 품목은 최초 등장 순서로 합산한다. 예를 들어 컵라면·마스크·컵라면 각 1개는
 컵라면 2개, 마스크 1개 순서로 slot_1~slot_3에 배정한다. 빈 슬롯명·중복 슬롯명·슬롯 수 초과는 검증에서 거부한다.
 
-## 3. 로봇 없는 데모 실행
+## 3. Controller 실행 및 확인
 
 아래 명령은 저장소 루트 기준이다. 각 터미널에서 ROS 환경과 workspace 환경을 활성화한다.
-실제 command·position_estimation 서버는 함께 실행하지 않는다. 같은 이름의 서비스를 중복 제공하면 응답 서버를 특정할 수 없다.
+
+Controller는 `/get_command`, `/get_component_pose`, `/inspect_kit` 서비스를 이용하고 실제 `Motion`을 통해 M0609과 RG2를 움직인다.
+
+실행 전에 DSR 드라이버의 `/dsr01/dsr_controller2/...` 서비스, 음성·비전·좌표 추정 노드, RG2의 `192.168.1.1:502` 연결을 확인한다. 작업영역을 비우고 비상 정지 장치와 저속 운전 상태를 확인한 뒤 Controller를 시작한다. 서비스가 준비되면 명령에 따라 관찰 이동·파지·배치·검사·복귀가 실제로 수행된다.
+
+전체 실행 순서와 DB 확인 방법은 [07 전체 동작 시연 테스트 시나리오](07-test-scenario.md)를 따른다.
 
 ### 3.1 빌드
 
@@ -67,18 +73,21 @@ ros2 topic echo /kit/task_status
 ros2 topic echo /kit/component_result
 ```
 
-### 3.3 데모 서비스
+### 3.3 의존 노드 확인
+
+Controller 실행 전에 다음 서비스가 준비되었는지 확인한다.
 
 별도 터미널에서:
 
 ```bash
-source /opt/ros/jazzy/setup.bash
-source install/setup.bash
-python3 src/kit_robot/kit_robot/controller_demo_services.py
+ros2 service list | grep -E '/get_command|/get_component_pose|/inspect_kit'
 ```
 
-컵라면 1개 명령, 가상 자세 `[0.0] * 6`, 기대 수량과 같은 검사 수량·PASS를 반환한다.
-실제 검출·검사를 수행하지 않으므로 이 서비스의 좌표를 실제 Motion에 전달하지 않는다.
+다음 서비스가 모두 보여야 한다.
+
+- `/get_command`
+- `/get_component_pose`
+- `/inspect_kit`
 
 ### 3.4 Controller
 
@@ -86,23 +95,26 @@ python3 src/kit_robot/kit_robot/controller_demo_services.py
 
 ```bash
 source /opt/ros/jazzy/setup.bash
+source ~/ws_cobot_pjt/ws_dsr/install/setup.bash
 source install/setup.bash
 ros2 run kit_robot controller --ros-args \
   --params-file src/kit_robot/resource/controller.yaml
 ```
 
+DSR 워크스페이스가 다른 위치에 설치되어 있으면 두 번째 `source` 경로를 실제 위치로 바꾼다.
+
 설치된 YAML을 사용하려면 params-file 경로를
 `"$(ros2 pkg prefix kit_robot)/share/kit_robot/resource/controller.yaml"`로 바꾼다.
 
-기대 흐름은 `IDLE → LISTEN → VALIDATE → OBSERVE → EXECUTE → INSPECT → REPORT`다.
-컵라면의 ComponentResult는 SUCCESS, attempt_count=1, slot=slot_1이며 최종 TaskStatus는 SUCCESS와 검사 PASS다.
-최종 Task 발행 전에 move_home 로그가 출력된다. 기본 5초 후 새 task_id로 반복한다.
-데모 서버는 매 요청마다 같은 명령을 반환하므로 한 번만 확인하려면 Controller를 직접 종료한다.
+기본 상태 흐름은 `IDLE → LISTEN → VALIDATE → OBSERVE → EXECUTE → INSPECT → REPORT`다.
+ComponentResult의 품목·시도 횟수·슬롯·결과는 실제 명령과 Motion 실행 결과에 따라 결정된다.
+최종 TaskStatus는 검사 결과와 복귀 성공 여부를 반영하며, 기본 5초 후 다음 작업을 시작한다.
+한 번만 확인하려면 최종 결과 발행 후 Controller를 종료한다.
 
-## 4. 실제 음성 노드 연결 시
+## 4. 음성 노드 실행
 
-데모 서버 하나가 서비스 세 개를 제공하므로 실제 음성 노드와 함께 켜지 않는다.
-실제 음성과 가상 비전을 혼합하려면 서비스가 중복되지 않도록 별도 테스트 구성이 필요하다.
+음성 노드는 `/get_command` 서비스를 제공한다.
+Controller를 실행하기 전에 음성 노드를 먼저 실행하고 서비스가 준비되었는지 확인한다.
 
 음성 노드는 `src/kit_voice/resource/.env`의 `OPENAI_API_KEY`를 설치 경로에서 읽는다.
 파일 생성 후 kit_voice를 재빌드하고 환경을 활성화한다. 키 내용은 문서·로그에 복사하지 않는다.
@@ -140,15 +152,16 @@ PYTHONPATH=src/kit_robot python3 -m pytest \
   src/kit_robot/test/test_controller_model.py -q
 ```
 
-PR 작성 시 위 테스트 7개 통과를 확인했다. 개발 중 명령 수신·검증과 데모 실행은 수동 확인했으며,
-실제 로봇·전체 DB 연동 및 모든 오류 경로의 통합 검증 완료를 의미하지 않는다.
+위 모델 단위 테스트 7개가 통과하는 것을 확인했다.
+이는 명령 검증과 Component 생성 모델에 대한 단위 검증이며,
+실제 로봇·비전·음성·DB를 포함한 전체 통합 검증 완료를 의미하지 않는다.
 
 후속 검증·구현 항목:
 
-- 실제 Motion과 슬롯 좌표 연결, DSR 초기화·executor 응답 처리 확인.
-- 테스트 서비스의 실패 응답·지연과 Motion 파지·복구 실패를 주입해 재시도·SKIPPED·중복 발행 검증.
+- 실제 Motion과 `config/motion.yaml` 슬롯 좌표는 연결되어 있다. 실제 장비에서 DSR 초기화·별도 DSR 인터페이스 노드의 응답 처리·슬롯 좌표 안전성을 검증한다.
+- 실제 서비스 또는 별도 테스트 fixture에 실패 응답·지연을 주입하고 Motion 파지·복구 실패에 대한 재시도·SKIPPED·중복 발행을 검증한다.
 - 검사 화면에서 원본 물체가 제외되는지 확인. 현재 검사 서버에는 ROI 필터가 없다.
 - 다음 작업 전 트레이 교체·빈 상태 확인. 현재 자동 재시작은 이를 기다리지 않는다.
-- timer 전체의 예외 처리와 직렬화·발행 오류 대응 검토. 모든 예외가 REPORT로 전환되지는 않는다.
+- `spin_once()`·`timer_tick()` 반복 루프 전체의 예외 처리와 직렬화·발행 오류 대응 검토. 모든 예외가 REPORT로 전환되지는 않는다.
 - 음성 is_wakeup/close의 미처리 예외와 명령 전체 응답 시간 검증.
 - EMERGENCY·일시 정지·실행 중 강제 중단은 별도 요구사항 확정 후 구현.
