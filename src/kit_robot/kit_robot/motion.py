@@ -11,26 +11,69 @@ from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import Pose
 from moveit_msgs.action import ExecuteTrajectory, MoveGroup
 from moveit_msgs.msg import (
+    AllowedCollisionEntry,
     CollisionObject,
     Constraints,
     JointConstraint,
     MoveItErrorCodes,
     OrientationConstraint,
     PlanningScene,
+    PlanningSceneComponents,
     PositionConstraint,
 )
-from moveit_msgs.srv import ApplyPlanningScene, GetCartesianPath
+from moveit_msgs.srv import (
+    ApplyPlanningScene,
+    GetCartesianPath,
+    GetPlanningScene,
+)
 from rclpy.action import ActionClient
 from rclpy.duration import Duration
 from rclpy.executors import MultiThreadedExecutor
-from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from rclpy.qos import (
+    DurabilityPolicy,
+    QoSProfile,
+    ReliabilityPolicy,
+    qos_profile_sensor_data,
+)
 from rclpy.time import Time
+from sensor_msgs.msg import PointCloud2
 from shape_msgs.msg import SolidPrimitive
+from std_srvs.srv import Empty
 from visualization_msgs.msg import Marker
 from scipy.spatial.transform import Rotation
 from tf2_ros import Buffer, TransformListener
 
 from .onrobot import RG
+
+
+def merge_octomap_acm(entry_names, matrix, allowed_links):
+    """Return (names, matrix) with "<octomap>" allowed against allowed_links.
+
+    Pure list surgery so it can be checked without a running move_group. The
+    input must be the *current* ACM: a PlanningScene diff carrying a non-empty
+    ACM replaces the whole matrix, so anything dropped here (the SRDF
+    self-collision pairs) stops being ignored and planning dies on self-hits.
+    """
+    names = list(entry_names)
+    matrix = [list(row) for row in matrix]
+
+    # "<octomap>" already exists if move_group kept running across a restart of
+    # this node; appending a name twice would leave a stale, unused row.
+    for name in ["<octomap>"] + list(allowed_links):
+        if name in names:
+            continue
+        names.append(name)
+        for row in matrix:
+            row.append(False)
+        matrix.append([False] * len(names))
+
+    octomap_index = names.index("<octomap>")
+    for name in allowed_links:
+        index = names.index(name)
+        matrix[octomap_index][index] = True
+        matrix[index][octomap_index] = True
+
+    return names, matrix
 
 
 class Motion:
@@ -119,6 +162,35 @@ class Motion:
             )
         )
 
+        # Octomap gate. cloud_out must match point_cloud_topic in the MoveIt
+        # config's sensors_3d.yaml, otherwise the octomap stays empty silently.
+        self.octomap_config = self.moveit_config.get("octomap", {})
+        self.octomap_enabled = bool(self.octomap_config.get("enabled", True))
+        self.octomap_cloud_in = str(
+            self.octomap_config.get("cloud_in", "/camera/depth/color/points")
+        )
+        self.octomap_cloud_out = str(
+            self.octomap_config.get("cloud_out", "/kit/octomap_cloud")
+        )
+        self.octomap_clear_service = str(
+            self.octomap_config.get("clear_service", "/dsr01/clear_octomap")
+        )
+        self.octomap_get_scene_service = str(
+            self.octomap_config.get(
+                "get_planning_scene_service", "/dsr01/get_planning_scene"
+            )
+        )
+        # Links allowed to collide with octomap voxels: the gripper and what is
+        # bolted to it. The target object and the table are voxels too, so
+        # without this no grasp is ever plannable. Upper arm links stay out.
+        self.octomap_allowed_links = [
+            str(name)
+            for name in self.octomap_config.get(
+                "allowed_collision_links",
+                ["link_6", "tool0", "rg2_base_link"],
+            )
+        ]
+
         self.server_timeout = float(
             self.moveit_config.get("server_ready_timeout_sec", 15.0)
         )
@@ -202,6 +274,32 @@ class Motion:
             Marker, self.keepout_marker_topic, marker_qos
         )
 
+        # Open by default so a run that never reaches the observation pose (or a
+        # bringup without Controller) still shows a map in RViz.
+        self._octomap_mapping = self.octomap_enabled
+        self._clear_octomap_client = None
+        self._get_planning_scene_client = None
+        if self.octomap_enabled:
+            self._clear_octomap_client = self._moveit_node.create_client(
+                Empty, self.octomap_clear_service
+            )
+            self._get_planning_scene_client = self._moveit_node.create_client(
+                GetPlanningScene, self.octomap_get_scene_service
+            )
+            self._octomap_cloud_pub = self._moveit_node.create_publisher(
+                PointCloud2, self.octomap_cloud_out, qos_profile_sensor_data
+            )
+            # ponytail: Python relay of a 848x480 cloud. Only open while the arm
+            # is parked, and the updater throttles to max_update_rate anyway. If
+            # CPU matters, point sensors_3d.yaml at the camera topic and gate the
+            # driver instead.
+            self._moveit_node.create_subscription(
+                PointCloud2,
+                self.octomap_cloud_in,
+                self._octomap_cloud_callback,
+                qos_profile_sensor_data,
+            )
+
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(
             self._tf_buffer, self._moveit_node, spin_thread=False
@@ -211,6 +309,7 @@ class Motion:
 
         self._wait_for_moveit_servers()
         self._add_default_keepout_box()
+        self._allow_octomap_collisions()
         self.logger.info(
             "MoveIt2 Motion initialized: "
             f"group={self.group_name}, base={self.base_frame}, eef={self.eef_link}"
@@ -240,13 +339,34 @@ class Motion:
             raise RuntimeError(
                 f"GetCartesianPath service unavailable: {self.cartesian_service_name}"
             )
-        if self.keepout_enabled and not self._apply_planning_scene_client.wait_for_service(
+        # Needed by both the keepout box and the octomap ACM merge.
+        needs_planning_scene = self.keepout_enabled or self.octomap_enabled
+        if needs_planning_scene and not self._apply_planning_scene_client.wait_for_service(
             timeout_sec=self.server_timeout
         ):
             raise RuntimeError(
                 "ApplyPlanningScene service unavailable: "
                 f"{self.apply_planning_scene_service_name}"
             )
+
+        # Missing octomap services mean move_group has no occupancy map monitor.
+        # Without GetPlanningScene the ACM cannot be merged, and an un-excused
+        # octomap makes every grasp unplannable — so drop the map entirely
+        # instead of dying or bricking the run.
+        for client, name in (
+            (self._clear_octomap_client, self.octomap_clear_service),
+            (self._get_planning_scene_client, self.octomap_get_scene_service),
+        ):
+            if not self.octomap_enabled:
+                break
+            if client.wait_for_service(timeout_sec=self.server_timeout):
+                continue
+            self.logger.warning(
+                f"Octomap service unavailable: {name} — octomap disabled. "
+                "Obstacle avoidance falls back to the keepout box only."
+            )
+            self.octomap_enabled = False
+            self._octomap_mapping = False
 
     def _wait_future(self, future, timeout_sec, description):
         deadline = time.monotonic() + timeout_sec
@@ -423,10 +543,141 @@ class Motion:
         return True
 
     # ------------------------------------------------------------------
+    # Octomap (MoveIt occupancy map monitor)
+    # ------------------------------------------------------------------
+
+    def _octomap_cloud_callback(self, msg):
+        if self._octomap_mapping:
+            self._octomap_cloud_pub.publish(msg)
+
+    def set_octomap_mapping(self, enabled):
+        """Open/close the point-cloud gate that feeds MoveIt's octomap.
+
+        Only open it while the arm is parked. The camera is eye-in-hand, so a
+        cloud captured mid-motion is registered with the wrong TF and smears
+        voxels across the workspace.
+        """
+        if not self.octomap_enabled:
+            return False
+
+        enabled = bool(enabled)
+        if enabled != self._octomap_mapping:
+            self.logger.info(
+                f"Octomap mapping {'ON' if enabled else 'OFF'} "
+                f"({self.octomap_cloud_in} -> {self.octomap_cloud_out})"
+            )
+        self._octomap_mapping = enabled
+        return enabled
+
+    def clear_octomap(self):
+        """Drop every voxel MoveIt has collected.
+
+        Voxels are never un-occupied by a new cloud that simply no longer sees
+        them, so a picked-up object would haunt the map forever. Clear right
+        before re-opening the gate at an observation/inspection pose; never
+        during a pick, or the map the arm is avoiding disappears.
+        """
+        if not self.octomap_enabled:
+            return False
+
+        future = self._clear_octomap_client.call_async(Empty.Request())
+        try:
+            self._wait_future(future, self.server_timeout, "ClearOctomap")
+        except Exception as error:
+            self.logger.warning(f"ClearOctomap failed: {error}")
+            return False
+
+        self.logger.info("Octomap cleared")
+        return True
+
+    def _allow_octomap_collisions(self):
+        """Excuse the gripper links from octomap collisions, once, at startup.
+
+        MoveIt keeps one special ACM entry named "<octomap>" covering every
+        voxel. Allowing it against the gripper links lets the fingers reach
+        into the target object's voxels while the upper arm still avoids
+        everything the camera mapped.
+
+        The ACM has to be read first: a PlanningScene diff carrying a non-empty
+        ACM *replaces* the whole matrix, which would wipe the SRDF
+        self-collision pairs.
+        """
+        if not self.octomap_enabled or not self.octomap_allowed_links:
+            return False
+
+        request = GetPlanningScene.Request()
+        request.components.components = (
+            PlanningSceneComponents.ALLOWED_COLLISION_MATRIX
+        )
+        future = self._get_planning_scene_client.call_async(request)
+        response = self._wait_future(
+            future, self.server_timeout, "GetPlanningScene(ACM)"
+        )
+
+        acm = response.scene.allowed_collision_matrix
+        if not acm.entry_names:
+            raise RuntimeError(
+                "Planning scene returned an empty ACM; "
+                "refusing to overwrite self-collision pairs"
+            )
+
+        unknown = [
+            name
+            for name in self.octomap_allowed_links
+            if name not in acm.entry_names
+        ]
+        if unknown:
+            # A typo here fails silently otherwise: the entry is created, matches
+            # no link, and every grasp keeps colliding with the object voxels.
+            self.logger.warning(
+                f"octomap.allowed_collision_links not in the robot ACM: {unknown}"
+            )
+
+        names, matrix = merge_octomap_acm(
+            list(acm.entry_names),
+            [list(entry.enabled) for entry in acm.entry_values],
+            self.octomap_allowed_links,
+        )
+
+        scene = PlanningScene()
+        scene.is_diff = True
+        scene.allowed_collision_matrix.entry_names = names
+        scene.allowed_collision_matrix.entry_values = [
+            AllowedCollisionEntry(enabled=row) for row in matrix
+        ]
+        scene.allowed_collision_matrix.default_entry_names = list(
+            acm.default_entry_names
+        )
+        scene.allowed_collision_matrix.default_entry_values = list(
+            acm.default_entry_values
+        )
+
+        apply_request = ApplyPlanningScene.Request()
+        apply_request.scene = scene
+        apply_future = self._apply_planning_scene_client.call_async(apply_request)
+        apply_response = self._wait_future(
+            apply_future, self.server_timeout, "ApplyPlanningScene(octomap ACM)"
+        )
+
+        if apply_response is None or not apply_response.success:
+            raise RuntimeError("Failed to allow octomap collisions for the gripper")
+
+        self.logger.info(
+            "Octomap collisions allowed for "
+            f"{len(self.octomap_allowed_links)} links: "
+            f"{self.octomap_allowed_links}"
+        )
+        return True
+
+    # ------------------------------------------------------------------
     # MoveIt joint planning (replacement for movej)
     # ------------------------------------------------------------------
 
     def move_joint(self, joint_deg, velocity_scale=None, acceleration_scale=None):
+        # eye-in-hand: a cloud captured while moving lands on the wrong TF and
+        # smears voxels. Stop accumulating; the existing map stays and is avoided.
+        self.set_octomap_mapping(False)
+
         values = list(joint_deg)
         if len(values) != len(self.joint_names):
             raise ValueError(
@@ -581,10 +832,22 @@ class Motion:
         return self._move_named_position("home")
 
     def move_to_observation_pose(self):
-        return self._move_named_position("observation_pose")
+        # Map refresh point: stale voxels out (the previous component is gone from
+        # the table by now), then let the cloud through while Controller waits out
+        # observation_settle_sec. The snapshot taken here is what the arm avoids
+        # for the rest of the cycle.
+        result = self._move_named_position("observation_pose")
+        self.clear_octomap()
+        self.set_octomap_mapping(True)
+        return result
 
     def move_to_inspection_pose(self):
-        return self._move_named_position("inspection_pose")
+        # Second refresh point: the tray is in frame here, so the map picks up the
+        # already-placed components as obstacles.
+        result = self._move_named_position("inspection_pose")
+        self.clear_octomap()
+        self.set_octomap_mapping(True)
+        return result
 
     # ------------------------------------------------------------------
     # Current TCP pose: keep old DSR posx-compatible mm + ZYZ-degree format
@@ -644,6 +907,8 @@ class Motion:
             [x_mm, y_mm, z_mm, rx_deg, ry_deg, rz_deg]
         where orientation is ZYZ Euler in ``base_frame``.
         """
+
+        self.set_octomap_mapping(False)
 
         if position_tolerance_mm <= 0.0:
             raise ValueError("position_tolerance_mm must be positive")
@@ -775,6 +1040,8 @@ class Motion:
     # ------------------------------------------------------------------
 
     def move_linear(self, target_pose, vel=100, acc=200, avoid_collisions=True):
+        self.set_octomap_mapping(False)
+
         if vel <= 0 or acc <= 0:
             raise ValueError("vel and acc must be positive")
 

@@ -27,6 +27,34 @@ motion:
 
       marker_topic: "/kit_robot/default_keepout_box_marker"
 
+    # Octomap 게이트. eye-in-hand 라 팔이 움직이는 동안 쌓으면 voxel 이 번져서,
+    # 카메라 포인트클라우드를 그대로 move_group 에 주지 않고 여기서 중계하며
+    # "관찰·검사 자세에 멈춰 있을 때만" 연다. 누적은 멈추지만 지도는 지우지 않고
+    # 다음 갱신까지 유지되므로, 픽·플레이스 전 구간에서 장애물 회피가 살아 있다.
+    # cloud_out 은 sensors_3d.yaml 의 point_cloud_topic 과 반드시 같아야 한다.
+    octomap:
+      enabled: true
+      cloud_in: "/camera/depth/color/points"
+      cloud_out: "/kit/octomap_cloud"
+      clear_service: "/dsr01/clear_octomap"
+      get_planning_scene_service: "/dsr01/get_planning_scene"
+
+      # 집으려는 물체와 테이블도 octomap 에는 그냥 장애물이다. 그리퍼가 물체
+      # voxel 을 통과하지 못하면 파지 자체가 계획되지 않으므로, ACM 의
+      # "<octomap>" 항목에서 아래 링크만 충돌 허용으로 바꾼다.
+      # 상완·팔꿈치·본체(link_1~link_5)는 일부러 빼둔다 — 그쪽이 실제 회피다.
+      allowed_collision_links:
+        - "link_6"
+        - "tool0"
+        - "bracket_link"
+        - "rg2_base_link"
+        - "rg2_left_outer_knuckle"
+        - "rg2_left_inner_knuckle"
+        - "rg2_left_inner_finger"
+        - "rg2_right_outer_knuckle"
+        - "rg2_right_inner_knuckle"
+        - "rg2_right_inner_finger"
+
     server_ready_timeout_sec: 15.0
     motion_timeout_sec: 60.0
     tf_timeout_sec: 2.0

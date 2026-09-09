@@ -22,6 +22,14 @@
   <depend>geometry_msgs</depend>
   <depend>moveit_msgs</depend>
   <depend>tf2_ros</depend>
+  <!-- keepout box: SolidPrimitive + RViz Marker. moveit_msgs 가 transitive 로
+       끌어오지만, ament_python 은 import 를 빌드 때 검사하지 않아 빠지면
+       Motion.__init__ 에서 ModuleNotFoundError 로 터진다. -->
+  <depend>shape_msgs</depend>
+  <depend>visualization_msgs</depend>
+  <!-- Octomap gate: point-cloud relay + clear_octomap -->
+  <depend>sensor_msgs</depend>
+  <depend>std_srvs</depend>
 
   <!-- Python runtime -->
   <exec_depend>python3-yaml</exec_depend>

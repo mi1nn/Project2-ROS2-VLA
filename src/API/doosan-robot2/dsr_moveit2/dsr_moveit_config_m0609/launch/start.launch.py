@@ -495,6 +495,18 @@ def rviz_and_move_group_fn(context):
             load_all=False,
         )
 
+        # ------------------------------------------------------------
+        # Octomap (occupancy map monitor).
+        #
+        # to_moveit_configs() 가 기본 경로를 자동으로 읽긴 하지만,
+        # 빠지면 에러 없이 조용히 octomap 만 안 생긴다. 명시한다.
+        # ------------------------------------------------------------
+        .sensors_3d(
+            file_path=(
+                "config/sensors_3d.yaml"
+            )
+        )
+
         .to_moveit_configs()
     )
 

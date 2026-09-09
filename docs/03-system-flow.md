@@ -357,6 +357,24 @@ Controller는 외부에서 주입된 객체만 사용한다. Motion은 다음 �
 | `pick_component(component_name, target_pose) -> bool` | 파지 확인 성공 True, 재시도 가능한 파지 실패 False |
 | `place_component(component_name, slot_name) -> None` | 슬롯 이름으로 좌표 조회 후 배치 완료 |
 | `recover_to_safe_pose() -> None` | 그리퍼 개방과 안전 자세 복귀 완료 |
+| `set_octomap_mapping(enabled) -> bool` | Octomap 입력 포인트클라우드 게이트 개폐. 비활성 설정이면 False |
+| `clear_octomap() -> bool` | MoveIt octomap voxel 전체 삭제 |
+
+Octomap 두 메서드는 Controller가 직접 부르지 않아도 된다. 지도를 **갱신하는 지점은
+관찰 자세와 검사 자세 두 곳**이다 — `move_to_observation_pose()`·`move_to_inspection_pose()`가
+도착 후 `clear_octomap()` + 게이트 개방을 하고, `move_joint`/`move_pose`/`move_linear`가
+맨 앞에서 게이트를 닫는다. eye-in-hand 라 이동 중에 쌓으면 voxel 이 번지기 때문이다.
+
+**누적은 멈추지만 지도는 지우지 않는다.** 관찰 자세에서 찍은 스냅샷이 상공 이동·하강·파지·
+후퇴·place·검사 전 구간에 살아 있어서, 그 사이의 모든 계획이 voxel 을 피해 나온다.
+집으려는 물체와 테이블도 voxel 이라 그리퍼가 통과하지 못하면 파지 자체가 계획되지 않는데,
+그건 `Motion.__init__` 이 ACM 의 `"<octomap>"` 항목을 `moveit.octomap.allowed_collision_links`
+(그리퍼·브래킷·`link_6`·`tool0`)에 대해서만 충돌 허용으로 바꿔 해결한다. `link_1`~`link_5` 는
+일부러 빠져 있다 — **상완·팔꿈치·본체의 voxel 회피가 이 기능의 목적**이다.
+
+한계: 지도는 스냅샷이라 이동 중에 걸어 들어온 사람은 보이지 않는다. 실시간 회피는
+고정(eye-to-hand) 카메라가 있어야 한다. 사람 쪽 차단은 octomap 이 아니라
+`default_keepout_box`(초록 벽)가 계속 담당한다.
 
 동작 메서드는 완료 후 반환하며 수행 불가 시 예외를 발생시킨다. Controller는
 DSR·RG2를 직접 호출하거나 슬롯 좌표·파지 파라미터를 해석하지 않는다.
