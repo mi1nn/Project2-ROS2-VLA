@@ -32,6 +32,12 @@ realsense_d435:
 # 고정 프레임이어야 한다. keepout box 와 같은 frame 을 쓴다(motion.yaml: moveit.base_frame).
 octomap_frame: base_link
 
-# 4 mm voxel. 8mm에서 더 낮춤 — voxel 수는 세제곱으로 늘어나니(15mm 대비
-# 약 53배) CPU/업데이트 지연 체감되면 여기부터 올릴 것.
-octomap_resolution: 0.004
+# 2 mm voxel. 4mm에서 더 낮춤 — voxel 수는 세제곱으로 늘어나니(15mm 대비
+# 약 422배) CPU/업데이트 지연 체감되면 여기부터 올릴 것.
+#
+# ponytail: D435 자체의 깊이 노이즈 floor 가 보통 이보다 크다(작업 거리
+# 30~70cm 에서 수 mm 단위로 흔들림) — voxel 을 노이즈 floor 보다 더 잘게
+# 썰어도 정확도가 더 좋아지진 않고, 오히려 그 흔들림이 그대로 울퉁불퉁한
+# voxel 로 보인다. 평면이 계속 심하게 울퉁불퉁하면 여기를 더 낮추기 전에
+# bringup.launch.py 의 RealSense spatial/temporal filter 부터 확인할 것.
+octomap_resolution: 0.002

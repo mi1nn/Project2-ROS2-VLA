@@ -296,6 +296,18 @@ def generate_launch_description():
             # "No matching stream for texture") cloud 가 rgb 없이 발행된다 —
             # RViz 기본 설정(RGB8 transformer)은 rgb 를 요구하므로 표시가 깨진다.
             'pointcloud.stream_filter': 2,
+            # octomap voxel 을 8mm -> 2mm 로 낮추자 평평한 테이블/트레이 표면이
+            # 심하게 울퉁불퉁하게 잡혔다 — 우리 코드가 아니라 raw depth 자체의
+            # 픽셀별 노이즈다. librealsense 가 이미 갖고 있는 후처리 필터로
+            # depth 프레임 단계에서 지운다(직접 스무딩 코드를 짜지 않는다).
+            # decimation: depth 해상도를 낮춰 픽셀당 노이즈를 줄인다(정렬 후
+            #   출력 해상도는 색상 해상도 그대로라 다른 코드에 영향 없다).
+            # spatial: 프레임 안에서 엣지는 보존하며 평면을 매끈하게 만든다.
+            # temporal: 정지 상태(관찰 자세에서 옥토맵 게이트가 열려있는
+            #   동안)에는 프레임 간 값을 누적해 흔들림을 크게 줄인다.
+            'decimation_filter.enable': True,
+            'spatial_filter.enable': True,
+            'temporal_filter.enable': True,
             # rs_launch.py 는 IMU 를 기본 off 로 두지만 launch 를 우회하면 켜진 채
             # 뜨고, D435i 에서 "Motion Module failure" 하드웨어 에러를 뱉는다.
             # 이 파이프라인은 IMU 를 쓰지 않는다.
