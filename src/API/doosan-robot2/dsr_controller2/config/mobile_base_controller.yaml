@@ -1,0 +1,57 @@
+/**:
+  controller_manager:
+    ros__parameters:
+      update_rate: 100  # Hz
+
+      # Broadcasters
+      joint_state_broadcaster:
+        type: joint_state_broadcaster/JointStateBroadcaster
+
+      # Mobile base controller
+      diff_drive_controller:
+        type: diff_drive_controller/DiffDriveController
+
+  diff_drive_controller:
+    ros__parameters:
+      use_stamped_vel: false
+      # Wheel joints
+      left_wheel_names: ["left_wheel_joint"]
+      right_wheel_names: ["right_wheel_joint"]
+
+      # Physical parameters (from macro.boxer_mobile.xacro)
+      wheel_separation: 0.58  # 2 * wheel_y_offset (0.29 * 2)
+      wheel_radius: 0.080
+
+      # Velocity and acceleration limits
+      linear:
+        x:
+          has_velocity_limits: true
+          max_velocity: 1.0  # m/s
+          has_acceleration_limits: true
+          max_acceleration: 0.8  # m/s^2
+
+      angular:
+        z:
+          has_velocity_limits: true
+          max_velocity: 2.0  # rad/s
+          has_acceleration_limits: true
+          max_acceleration: 1.5  # rad/s^2
+
+      # Command timeout
+      cmd_vel_timeout: 0.5  # seconds
+
+      # Odometry
+      publish_rate: 50.0
+      enable_odom_tf: true
+      tf_frame_prefix_enable: false
+      odom_frame_id: odom
+      base_frame_id: base_link
+      pose_covariance_diagonal: [0.001, 0.001, 0.0, 0.0, 0.0, 0.01]
+      twist_covariance_diagonal: [0.001, 0.0, 0.0, 0.0, 0.0, 0.01]
+
+      # Open loop odometry for mock/sim mobile base
+      open_loop: true
+
+      # Wheels are controlled via velocity interface
+      wheel_separation_multiplier: 1.0
+      wheel_radius_multiplier: 1.0

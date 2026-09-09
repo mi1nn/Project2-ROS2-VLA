@@ -1,0 +1,44 @@
+{
+	"name": "Doosan Robotics ROS2 Dev Container",
+	"build": {
+		"dockerfile": "Dockerfile",
+		"context": ".."
+	},
+	"remoteUser": "doosan-robotics",
+	"workspaceFolder": "/workspace/doosan_ws/src/doosan-robot2",
+	"workspaceMount": "source=${localWorkspaceFolder},target=${containerWorkspaceFolder},type=bind",
+	"postCreateCommand": ".devcontainer/post-command.sh",
+	"runArgs": [
+		"--network=host",
+		"--volume=/tmp/.X11-unix:/tmp/.X11-unix",
+		"--volume=${localEnv:HOME}/.Xauthority:/tmp/.Xauthority:ro",
+		"--ipc=host",
+		"--privileged"
+	],
+	"features": {
+		"ghcr.io/devcontainers/features/docker-outside-of-docker:1": {
+			"installDockerBuildx": true,
+			"version": "latest",
+			"dockerDashComposeVersion": "v2"
+		}
+	},
+	"containerEnv": {
+		"DISPLAY": "${localEnv:DISPLAY}",
+		"XAUTHORITY": "/tmp/.Xauthority",
+		"LIBGL_ALWAYS_SOFTWARE": "1",
+		"QT_X11_NO_MITSHM": "1",
+		"XDG_RUNTIME_DIR": "/tmp/runtime-root"
+	},
+	"customizations": {
+		"vscode": {
+			"extensions": [
+				"ms-iot.vscode-ros",
+				"ms-python.python",
+				"ms-vscode.cpptools",
+				"twxs.cmake",
+				"ms-azuretools.vscode-docker",
+				"anthropic.claude-code"
+			]
+		}
+	}
+}

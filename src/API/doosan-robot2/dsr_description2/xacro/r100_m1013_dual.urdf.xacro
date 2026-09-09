@@ -1,0 +1,126 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="r100_m1013_dual">
+
+  <xacro:arg name="color" default="white"/>
+  <xacro:arg name="arm_prefix" default="arm_"/>
+  <xacro:arg name="arm2_prefix" default="arm2_"/>
+  <xacro:arg name="mount_xyz" default="0 -0.25 0"/>
+  <xacro:arg name="mount_rpy" default="0 0 0"/>
+  <xacro:arg name="arm2_mount_xyz" default="0 0.25 0"/>
+  <xacro:arg name="arm2_mount_rpy" default="0 0 0"/>
+  <xacro:arg name="use_gazebo" default="false"/>
+  <xacro:arg name="enable_ros2_control" default="false"/>
+  <xacro:arg name="host" default=""/>
+  <xacro:arg name="port" default=""/>
+  <xacro:arg name="rt_host" default=""/>
+  <xacro:arg name="mode" default=""/>
+  <xacro:arg name="model" default="m1013"/>
+  <xacro:arg name="update_rate" default=""/>
+  <xacro:arg name="arm2_host" default=""/>
+  <xacro:arg name="arm2_port" default=""/>
+  <xacro:arg name="arm2_rt_host" default=""/>
+  <xacro:arg name="arm2_mode" default=""/>
+  <xacro:arg name="arm2_model" default="m1013"/>
+  <xacro:arg name="arm2_update_rate" default=""/>
+
+  <xacro:macro name="r100_m1013_dual" params="color:='white' arm_prefix:='arm_' arm2_prefix:='arm2_' mount_xyz:='0 -0.25 0' mount_rpy:='0 0 0' arm2_mount_xyz:='0 0.25 0' arm2_mount_rpy:='0 0 0' use_gazebo:='false' enable_ros2_control:='false' host:='' port:='' rt_host:='' mode:='' model:='m1013' update_rate:='' arm2_host:='' arm2_port:='' arm2_rt_host:='' arm2_mode:='' arm2_model:='m1013' arm2_update_rate:=''
+  ">
+    <xacro:property name="cr" value="${color}"/>
+
+    <xacro:include filename="$(find dsr_description2)/xacro/r100.visual.urdf.xacro"/>
+    <xacro:r100 control="omni_4wd" front_wheels="mecanum" rear_wheels="mecanum" include_wheels="true"/>
+
+    <xacro:if value="${cr == 'white'}">
+      <xacro:include filename="$(find dsr_description2)/xacro/macro.m1013.white.prefixed.xacro"/>
+    </xacro:if>
+    <xacro:if value="${cr == 'blue'}">
+      <xacro:include filename="$(find dsr_description2)/xacro/macro.m1013.blue.prefixed.xacro"/>
+    </xacro:if>
+
+    <xacro:m1013_prefixed namespace="" prefix="${arm_prefix}" load_materials="true"/>
+    <xacro:m1013_prefixed namespace="" prefix="${arm2_prefix}" load_materials="false"/>
+
+    <joint name="r100_to_arm_mount" type="fixed">
+      <parent link="default_mount"/>
+      <child link="${arm_prefix}base_link"/>
+      <origin xyz="${mount_xyz}" rpy="${mount_rpy}"/>
+    </joint>
+
+    <joint name="r100_to_arm2_mount" type="fixed">
+      <parent link="default_mount"/>
+      <child link="${arm2_prefix}base_link"/>
+      <origin xyz="${arm2_mount_xyz}" rpy="${arm2_mount_rpy}"/>
+    </joint>
+
+    <!-- world link is provided by the top-level composite xacro -->
+
+    <xacro:if value="${enable_ros2_control}">
+      <xacro:if value="${use_gazebo}">
+        <xacro:include filename="$(find dsr_description2)/ros2_control/m1013.prefixed.gz_ros2_control.xacro"/>
+        <xacro:m1013_gz_ros2_control namespace="" prefix="${arm_prefix}" update_rate="${update_rate}"/>
+        <xacro:m1013_gz_ros2_control namespace="" prefix="${arm2_prefix}" update_rate="${arm2_update_rate}"/>
+      </xacro:if>
+      <xacro:unless value="${use_gazebo}">
+        <xacro:include filename="$(find dsr_description2)/ros2_control/m1013.prefixed.ros2_control.xacro"/>
+        <xacro:m1013_ros2_control
+          name="m1013_left"
+          prefix="${arm_prefix}"
+          host="${host}"
+          rt_host="${rt_host}"
+          port="${port}"
+          mode="${mode}"
+          model="${model}"
+          update_rate="${update_rate}"
+          apply_initial_state_on_start="true"
+          initial_joint_1="${pi}"
+          initial_joint_2="0.0"
+          initial_joint_3="0.0"
+          initial_joint_4="0.0"
+          initial_joint_5="0.0"
+          initial_joint_6="0.0"
+        />
+        <xacro:m1013_ros2_control
+          name="m1013_right"
+          prefix="${arm2_prefix}"
+          host="${arm2_host}"
+          rt_host="${arm2_rt_host}"
+          port="${arm2_port}"
+          mode="${arm2_mode}"
+          model="${arm2_model}"
+          update_rate="${arm2_update_rate}"
+          apply_initial_state_on_start="true"
+          initial_joint_1="0.0"
+          initial_joint_2="0.0"
+          initial_joint_3="0.0"
+          initial_joint_4="0.0"
+          initial_joint_5="0.0"
+          initial_joint_6="0.0"
+        />
+        <ros2_control name="mobile_base_system" type="system">
+          <hardware>
+            <plugin>mock_components/GenericSystem</plugin>
+            <param name="calculate_dynamics">false</param>
+          </hardware>
+          <joint name="left_wheel_joint">
+            <command_interface name="velocity">
+              <param name="min">-5.0</param>
+              <param name="max">5.0</param>
+            </command_interface>
+            <state_interface name="position"/>
+            <state_interface name="velocity"/>
+          </joint>
+          <joint name="right_wheel_joint">
+            <command_interface name="velocity">
+              <param name="min">-5.0</param>
+              <param name="max">5.0</param>
+            </command_interface>
+            <state_interface name="position"/>
+            <state_interface name="velocity"/>
+          </joint>
+        </ros2_control>
+      </xacro:unless>
+    </xacro:if>
+  </xacro:macro>
+
+  <!-- Macro only: instantiate in the consuming xacro to avoid duplicate material definitions -->
+</robot>

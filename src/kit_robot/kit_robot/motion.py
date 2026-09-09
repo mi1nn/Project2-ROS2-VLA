@@ -1036,11 +1036,7 @@ class Motion:
         return True
 
     def recover_to_safe_pose(self):
-<<<<<<< HEAD
         self.logger.warning("Recovering from task failure")
-=======
-        self.logger.warning("Recovering to safe pose")
->>>>>>> d662dc246286f173be78247ef38ba70c3e7ce537
         self.rg.open_gripper()
         time.sleep(2.0)
         self.logger.info("Recovery complete; current robot pose is preserved")

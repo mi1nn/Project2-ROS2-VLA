@@ -1,0 +1,374 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="m1013_dual_mobile">
+
+  <xacro:arg name="mode"           default="virtual"/>
+  <xacro:arg name="color"          default="white"/>
+  <xacro:arg name="namespace"      default=""/>
+
+  <!-- gripper control argument -->
+  <xacro:arg name="gripper"              default="none"/>         <!-- none | robotiq_2f85 -->
+  <xacro:arg name="left_gripper_prefix"  default="left_"/>
+  <xacro:arg name="right_gripper_prefix" default="right_"/>
+  <xacro:arg name="gripper_parent_link"  default="link_6"/>
+
+  <!-- dual arm configuration -->
+  <xacro:arg name="arm_spacing" default="0.6"/>  <!-- Distance between shoulder mounts (Y-axis) -->
+  <xacro:arg name="torso_width" default="0.4"/>
+  <xacro:arg name="torso_depth" default="0.3"/>
+  <xacro:arg name="torso_height" default="0.5"/>
+  <xacro:arg name="shoulder_height" default="0.5"/>
+
+  <!-- mobile base mounting -->
+  <xacro:arg name="torso_mount_height" default="0.15"/>  <!-- Height of torso mounting on mobile base -->
+
+  <xacro:arg name="use_gazebo" default="false"/>
+  <xacro:property name="gz" value="$(arg use_gazebo)"/>
+
+  <xacro:property name="cr" value="$(arg color)"/>
+  <xacro:property name="gr" value="$(arg gripper)"/>
+  <xacro:property name="spacing" value="$(arg arm_spacing)"/>
+  <xacro:property name="torso_w" value="$(arg torso_width)"/>
+  <xacro:property name="torso_d" value="$(arg torso_depth)"/>
+  <xacro:property name="torso_h" value="$(arg torso_height)"/>
+  <xacro:property name="shoulder_h" value="$(arg shoulder_height)"/>
+  <xacro:property name="mount_h" value="$(arg torso_mount_height)"/>
+
+  <!-- Include mobile base -->
+  <xacro:include filename="$(find dsr_description2)/config/macro.boxer_mobile.xacro"/>
+  <xacro:boxer_mobile_base prefix=""/>
+
+  <!-- Include materials -->
+  <xacro:include filename="$(find dsr_description2)/config/macro.materials.xacro"/>
+
+  <!-- Include M1013 robot macro with prefix support -->
+  <xacro:if value="${cr == 'white'}">
+    <xacro:include filename="$(find dsr_description2)/xacro/macro.m1013.white.prefixed.xacro"/>
+  </xacro:if>
+  <xacro:if value="${cr == 'blue'}">
+    <xacro:include filename="$(find dsr_description2)/xacro/macro.m1013.blue.xacro"/>
+  </xacro:if>
+
+  <xacro:dsr_materials />
+
+  <!-- World link -->
+  <link name="world"/>
+
+  <joint name="world_to_mobile_base" type="fixed">
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <parent link="world"/>
+    <child link="mobile_base_footprint"/>
+  </joint>
+
+  <!-- Torso (humanoid upper body style) mounted on mobile base -->
+  <link name="torso_link">
+    <inertial>
+      <mass value="60.0" />
+      <origin xyz="0 0 ${torso_h/2}" rpy="0 0 0" />
+      <inertia
+        ixx="${60.0*(torso_d*torso_d + torso_h*torso_h)/12}"
+        ixy="0" ixz="0"
+        iyy="${60.0*(torso_w*torso_w + torso_h*torso_h)/12}"
+        iyz="0"
+        izz="${60.0*(torso_w*torso_w + torso_d*torso_d)/12}" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 ${torso_h/2}" rpy="0 0 0" />
+      <geometry>
+        <box size="${torso_d} ${torso_w} ${torso_h}" />
+      </geometry>
+      <material name="grey"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 ${torso_h/2}" rpy="0 0 0" />
+      <geometry>
+        <box size="${torso_d} ${torso_w} ${torso_h}" />
+      </geometry>
+    </collision>
+  </link>
+
+  <gazebo reference="torso_link">
+    <material>Gazebo/Grey</material>
+  </gazebo>
+
+  <!-- Mount torso on mobile base -->
+  <joint name="mobile_base_to_torso" type="fixed">
+    <origin xyz="0 0 ${mount_h}" rpy="0 0 0"/>
+    <parent link="mobile_base_link"/>
+    <child link="torso_link"/>
+  </joint>
+
+  <!-- Left shoulder mount -->
+  <link name="left_shoulder">
+    <inertial>
+      <mass value="3.0" />
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <inertia ixx="0.015" ixy="0" ixz="0" iyy="0.015" iyz="0" izz="0.015" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <cylinder radius="0.08" length="0.1" />
+      </geometry>
+      <material name="grey"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <cylinder radius="0.08" length="0.1" />
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="left_shoulder_joint" type="fixed">
+    <origin xyz="0 ${spacing/2} ${shoulder_h}" rpy="0 0 0"/>
+    <parent link="torso_link"/>
+    <child link="left_shoulder"/>
+  </joint>
+
+  <!-- Right shoulder mount -->
+  <link name="right_shoulder">
+    <inertial>
+      <mass value="3.0" />
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <inertia ixx="0.015" ixy="0" ixz="0" iyy="0.015" iyz="0" izz="0.015" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <cylinder radius="0.08" length="0.1" />
+      </geometry>
+      <material name="grey"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <cylinder radius="0.08" length="0.1" />
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="right_shoulder_joint" type="fixed">
+    <origin xyz="0 ${-spacing/2} ${shoulder_h}" rpy="0 0 0"/>
+    <parent link="torso_link"/>
+    <child link="right_shoulder"/>
+  </joint>
+
+  <!-- Instantiate left M1013 arm with prefix -->
+  <xacro:m1013_prefixed namespace="left" prefix="left_"/>
+
+  <!-- Connect left arm to left shoulder -->
+  <joint name="left_arm_mount" type="fixed">
+    <origin xyz="0 0 0.05" rpy="0 0 1.5708"/>
+    <parent link="left_shoulder"/>
+    <child link="left_base_link"/>
+  </joint>
+
+  <!-- Instantiate right M1013 arm with prefix -->
+  <xacro:m1013_prefixed namespace="right" prefix="right_"/>
+
+  <!-- Connect right arm to right shoulder -->
+  <joint name="right_arm_mount" type="fixed">
+    <origin xyz="0 0 0.05" rpy="0 0 1.5708"/>
+    <parent link="right_shoulder"/>
+    <child link="right_base_link"/>
+  </joint>
+
+  <!-- ROS2 Control for Robot Arms -->
+  <xacro:unless value="${gz}">
+    <!-- Left arm ros2_control -->
+    <xacro:include filename="$(find dsr_description2)/ros2_control/m1013.ros2_control.xacro"/>
+
+    <ros2_control name="left_m1013_system" type="system">
+      <hardware>
+        <plugin>dsr_hardware2/DRHWInterface</plugin>
+        <param name="name">left_m1013</param>
+        <param name="rate">100</param>
+        <param name="standby">5000</param>
+        <param name="command">true</param>
+        <param name="host">127.0.0.1</param>
+        <param name="port">12345</param>
+        <param name="mode">$(arg mode)</param>
+        <param name="model">m1013</param>
+        <param name="gripper">$(arg gripper)</param>
+        <param name="mobile">none</param>
+      </hardware>
+
+      <joint name="left_joint_1">
+        <command_interface name="position">
+          <param name="min">-6.2832</param>
+          <param name="max">6.2832</param>
+        </command_interface>
+        <command_interface name="velocity"/>
+        <state_interface name="position"/>
+        <state_interface name="velocity"/>
+      </joint>
+      <joint name="left_joint_2">
+        <command_interface name="position">
+          <param name="min">-6.2832</param>
+          <param name="max">6.2832</param>
+        </command_interface>
+        <command_interface name="velocity"/>
+        <state_interface name="position"/>
+        <state_interface name="velocity"/>
+      </joint>
+      <joint name="left_joint_3">
+        <command_interface name="position">
+          <param name="min">-2.7925</param>
+          <param name="max">2.7925</param>
+        </command_interface>
+        <command_interface name="velocity"/>
+        <state_interface name="position"/>
+        <state_interface name="velocity"/>
+      </joint>
+      <joint name="left_joint_4">
+        <command_interface name="position">
+          <param name="min">-6.2832</param>
+          <param name="max">6.2832</param>
+        </command_interface>
+        <command_interface name="velocity"/>
+        <state_interface name="position"/>
+        <state_interface name="velocity"/>
+      </joint>
+      <joint name="left_joint_5">
+        <command_interface name="position">
+          <param name="min">-6.2832</param>
+          <param name="max">6.2832</param>
+        </command_interface>
+        <command_interface name="velocity"/>
+        <state_interface name="position"/>
+        <state_interface name="velocity"/>
+      </joint>
+      <joint name="left_joint_6">
+        <command_interface name="position">
+          <param name="min">-6.2832</param>
+          <param name="max">6.2832</param>
+        </command_interface>
+        <command_interface name="velocity"/>
+        <state_interface name="position"/>
+        <state_interface name="velocity"/>
+      </joint>
+    </ros2_control>
+
+    <!-- Right arm ros2_control -->
+    <ros2_control name="right_m1013_system" type="system">
+      <hardware>
+        <plugin>dsr_hardware2/DRHWInterface</plugin>
+        <param name="name">right_m1013</param>
+        <param name="rate">100</param>
+        <param name="standby">5000</param>
+        <param name="command">true</param>
+        <param name="host">127.0.0.1</param>
+        <param name="port">12348</param>
+        <param name="mode">$(arg mode)</param>
+        <param name="model">m1013</param>
+        <param name="gripper">$(arg gripper)</param>
+        <param name="mobile">none</param>
+      </hardware>
+
+      <joint name="right_joint_1">
+        <command_interface name="position">
+          <param name="min">-6.2832</param>
+          <param name="max">6.2832</param>
+        </command_interface>
+        <command_interface name="velocity"/>
+        <state_interface name="position"/>
+        <state_interface name="velocity"/>
+      </joint>
+      <joint name="right_joint_2">
+        <command_interface name="position">
+          <param name="min">-6.2832</param>
+          <param name="max">6.2832</param>
+        </command_interface>
+        <command_interface name="velocity"/>
+        <state_interface name="position"/>
+        <state_interface name="velocity"/>
+      </joint>
+      <joint name="right_joint_3">
+        <command_interface name="position">
+          <param name="min">-2.7925</param>
+          <param name="max">2.7925</param>
+        </command_interface>
+        <command_interface name="velocity"/>
+        <state_interface name="position"/>
+        <state_interface name="velocity"/>
+      </joint>
+      <joint name="right_joint_4">
+        <command_interface name="position">
+          <param name="min">-6.2832</param>
+          <param name="max">6.2832</param>
+        </command_interface>
+        <command_interface name="velocity"/>
+        <state_interface name="position"/>
+        <state_interface name="velocity"/>
+      </joint>
+      <joint name="right_joint_5">
+        <command_interface name="position">
+          <param name="min">-6.2832</param>
+          <param name="max">6.2832</param>
+        </command_interface>
+        <command_interface name="velocity"/>
+        <state_interface name="position"/>
+        <state_interface name="velocity"/>
+      </joint>
+      <joint name="right_joint_6">
+        <command_interface name="position">
+          <param name="min">-6.2832</param>
+          <param name="max">6.2832</param>
+        </command_interface>
+        <command_interface name="velocity"/>
+        <state_interface name="position"/>
+        <state_interface name="velocity"/>
+      </joint>
+    </ros2_control>
+  </xacro:unless>
+
+  <!-- ROS2 Control for Mobile Base -->
+  <!-- Note: Wheel joints are fixed (for visualization only), so no ros2_control needed -->
+  <!-- For actual mobile base control, use a separate nav2/diff_drive controller -->
+
+  <!-- Gripper support (optional) -->
+  <xacro:if value="${gr == 'robotiq_2f85'}">
+    <xacro:include filename="$(find dsr_description2)/gripper/robotiq.xacro"/>
+
+    <!-- Left gripper -->
+    <xacro:robotiq_85
+      parent="left_$(arg gripper_parent_link)"
+      prefix="$(arg left_gripper_prefix)"/>
+
+    <!-- Right gripper -->
+    <xacro:robotiq_85
+      parent="right_$(arg gripper_parent_link)"
+      prefix="$(arg right_gripper_prefix)"/>
+
+    <xacro:include filename="$(find dsr_description2)/gripper/robotiq.ros2_control.xacro"/>
+
+    <!-- Left gripper control -->
+    <xacro:robotiq_gripper_system
+      mode="$(arg mode)"
+      joint_name="$(arg left_gripper_prefix)robotiq_85_left_knuckle_joint"
+      system_name="$(arg left_gripper_prefix)robotiq_gripper_system"
+      pos_min="0.0"
+      pos_max="0.8"
+      init_pos="0.0"
+      speed_mult="1.0"
+      force_mult="0.5"
+      max_speed="0.150"
+      max_force="235.0"
+      mock_sensor_commands="true" />
+
+    <!-- Right gripper control -->
+    <xacro:robotiq_gripper_system
+      mode="$(arg mode)"
+      joint_name="$(arg right_gripper_prefix)robotiq_85_left_knuckle_joint"
+      system_name="$(arg right_gripper_prefix)robotiq_gripper_system"
+      pos_min="0.0"
+      pos_max="0.8"
+      init_pos="0.0"
+      speed_mult="1.0"
+      force_mult="0.5"
+      max_speed="0.150"
+      max_force="235.0"
+      mock_sensor_commands="true" />
+  </xacro:if>
+
+</robot>

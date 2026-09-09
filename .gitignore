@@ -240,8 +240,6 @@ build/
 log/
 install/
 
-src/API
-
 # Ruflo local secrets and runtime data
 .env.local
 .env.*.local
