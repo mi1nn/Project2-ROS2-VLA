@@ -61,6 +61,10 @@ motion:
       flatten_floor_band_m: 0.015
       flatten_floor_percentile: 5.0
 
+      # YOLO 경계의 mixed-depth/flying-pixel과 물체 아래 바닥 패치를 함께
+      # 제외하는 확장 폭. 너무 키우면 실제 인접 장애물도 숨으므로 실측 여유만 쓴다.
+      exclusion_mask_padding_px: 15
+
       # 집으려는 물체와 테이블도 octomap 에는 그냥 장애물이다. 그리퍼가 물체
       # voxel 을 통과하지 못하면 파지 자체가 계획되지 않으므로, ACM 의
       # "<octomap>" 항목에서 아래 링크만 충돌 허용으로 바꾼다.

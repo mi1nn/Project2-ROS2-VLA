@@ -202,6 +202,31 @@ def test_mask_cloud_polygon_drops_projected_points_inside_mask():
     assert list(keep) == [False, True, True, True]
 
 
+def test_mask_cloud_polygon_padding_drops_depth_noise_at_object_edge():
+    np = pytest.importorskip("numpy")
+    pytest.importorskip("cv2")
+    motion = pytest.importorskip(
+        "kit_robot.motion", reason="ROS 런타임 없음 (로봇/도커에서 실행)"
+    )
+
+    intrinsics = {"fx": 100.0, "fy": 100.0, "ppx": 50.0, "ppy": 50.0}
+    polygon = [[45, 45, 55, 45, 55, 55, 45, 55]]
+    xyz = np.array(
+        [
+            [0.0, 0.0, 1.0],   # (50, 50): target mask
+            [0.08, 0.0, 1.0],  # (58, 50): boundary flying pixel
+            [0.2, 0.0, 1.0],   # (70, 50): real nearby geometry
+        ],
+        dtype=np.float32,
+    )
+
+    keep = motion._mask_cloud_polygon(
+        xyz, [polygon], intrinsics, width=100, height=100, padding_px=10
+    )
+
+    assert list(keep) == [False, False, True]
+
+
 def test_mask_cloud_polygon_unions_multiple_instances_of_same_class():
     """같은 class_name 인스턴스가 여러 개면 마지막 것만 남기지 않고 전부 제외한다.
 
@@ -253,6 +278,22 @@ def test_wait_for_exclusion_mask_returns_immediately_once_mask_present():
     started = time.monotonic()
     motion.Motion._wait_for_exclusion_mask(Fake(), timeout_sec=1.0)
     assert time.monotonic() - started < 0.2
+
+
+def test_exclusion_mask_must_be_newer_than_pick_request():
+    motion = pytest.importorskip(
+        "kit_robot.motion", reason="ROS 런타임 없음 (로봇/도커에서 실행)"
+    )
+
+    class Fake:
+        _octomap_exclusion_component = "양갱"
+        _octomap_exclusion_min_stamp_ns = 200
+        _latest_detection_stamp_ns = 199
+        _latest_detection_masks = {"양갱": [[0, 0, 1, 0, 1, 1]]}
+
+    assert not motion.Motion._has_fresh_exclusion_mask(Fake())
+    Fake._latest_detection_stamp_ns = 200
+    assert motion.Motion._has_fresh_exclusion_mask(Fake())
 
 
 def test_wait_for_exclusion_mask_times_out_and_opens_anyway():

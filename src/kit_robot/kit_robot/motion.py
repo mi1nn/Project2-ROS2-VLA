@@ -79,7 +79,9 @@ def merge_octomap_acm(entry_names, matrix, allowed_links):
     return names, matrix
 
 
-def _mask_cloud_polygon(xyz, polygons_px, intrinsics, width, height):
+def _mask_cloud_polygon(
+    xyz, polygons_px, intrinsics, width, height, padding_px=0
+):
     """Return a bool array: True for points to KEEP (outside the YOLO masks).
 
     ``xyz`` is Nx3 in the camera optical frame (any linear unit — the
@@ -107,6 +109,15 @@ def _mask_cloud_polygon(xyz, polygons_px, intrinsics, width, height):
         for polygon_px in polygons_px
     ]
     cv2.fillPoly(mask_image, contours, 1)
+    if padding_px:
+        padding_px = int(padding_px)
+        if padding_px < 0:
+            raise ValueError("padding_px must be non-negative")
+        diameter = 2 * padding_px + 1
+        mask_image = cv2.dilate(
+            mask_image,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (diameter, diameter)),
+        )
 
     z = xyz[:, 2]
     projectable = np.isfinite(z) & (z > 0.0)
@@ -316,6 +327,11 @@ class Motion:
         self.octomap_flatten_percentile = float(
             self.octomap_config.get("flatten_floor_percentile", 5.0)
         )
+        self.octomap_exclusion_mask_padding_px = int(
+            self.octomap_config.get("exclusion_mask_padding_px", 15)
+        )
+        if self.octomap_exclusion_mask_padding_px < 0:
+            raise ValueError("octomap.exclusion_mask_padding_px must be >= 0")
         # Links allowed to collide with octomap voxels: the gripper and what is
         # bolted to it. The target object and the table are voxels too, so
         # without this no grasp is ever plannable. Upper arm links stay out.
@@ -423,8 +439,10 @@ class Motion:
         # 부분 삭제 API가 없어서, 게이트가 열리고 들어오는 첫 프레임부터 이미
         # 이 물체의 voxel 이 박히기 시작한다.
         self._octomap_exclusion_component = None
+        self._octomap_exclusion_min_stamp_ns = None
         # class_name -> DetectedObject.masking_map (최신 1개만 유지).
         self._latest_detection_masks = {}
+        self._latest_detection_stamp_ns = None
         # {"fx", "fy", "ppx", "ppy"} 또는 None (아직 camera_info 못 받음).
         self._camera_intrinsics = None
         self._camera_width = None
@@ -720,6 +738,25 @@ class Motion:
     def _octomap_cloud_callback(self, msg):
         if not self._octomap_mapping:
             return
+        if (
+            self._octomap_exclusion_component is not None
+            and not self._has_fresh_exclusion_mask()
+        ):
+            self.logger.warn(
+                "옥토맵 중계 보류: 파지 대상의 새 YOLO 마스크가 아직 없음 "
+                f"(component={self._octomap_exclusion_component})",
+                throttle_duration_sec=2.0,
+            )
+            return
+        if (
+            self._octomap_exclusion_component is not None
+            and self._camera_intrinsics is None
+        ):
+            self.logger.warn(
+                "옥토맵 중계 보류: 파지 대상 마스크를 투영할 camera_info가 없음",
+                throttle_duration_sec=2.0,
+            )
+            return
         self._octomap_cloud_pub.publish(self._filter_octomap_cloud(msg))
 
     def _detection_callback(self, msg):
@@ -731,6 +768,18 @@ class Motion:
         for obj in msg.objects:
             masks.setdefault(obj.class_name, []).append(list(obj.masking_map))
         self._latest_detection_masks = masks
+        stamp = msg.header.stamp
+        self._latest_detection_stamp_ns = stamp.sec * 1_000_000_000 + stamp.nanosec
+
+    def _has_fresh_exclusion_mask(self):
+        component = self._octomap_exclusion_component
+        if component is None:
+            return True
+        if not self._latest_detection_masks.get(component):
+            return False
+        minimum = getattr(self, "_octomap_exclusion_min_stamp_ns", None)
+        stamp = getattr(self, "_latest_detection_stamp_ns", None)
+        return minimum is None or (stamp is not None and stamp >= minimum)
 
     def _camera_info_callback(self, msg):
         self._camera_intrinsics = {
@@ -753,9 +802,11 @@ class Motion:
         if not self.octomap_enabled:
             return
         self._octomap_exclusion_component = component_name
+        self._octomap_exclusion_min_stamp_ns = self._moveit_node.get_clock().now().nanoseconds
 
     def clear_octomap_exclusion(self):
         self._octomap_exclusion_component = None
+        self._octomap_exclusion_min_stamp_ns = None
 
     def _flatten_floor_in_sensor_frame(self, xyz, header):
         """Round-trip ``xyz`` through base_frame to flatten floor wobble,
@@ -838,7 +889,7 @@ class Motion:
             masking_maps = self._latest_detection_masks.get(
                 self._octomap_exclusion_component
             )
-            if not masking_maps or self._camera_intrinsics is None:
+            if not self._has_fresh_exclusion_mask() or self._camera_intrinsics is None:
                 self.logger.warn(
                     "옥토맵 예외 미적용(디노이즈만 적용): "
                     f"component={self._octomap_exclusion_component}, "
@@ -853,6 +904,7 @@ class Motion:
                     self._camera_intrinsics,
                     self._camera_width,
                     self._camera_height,
+                    self.octomap_exclusion_mask_padding_px,
                 )
                 self.logger.info(
                     "옥토맵 예외 적용: "
@@ -1201,19 +1253,18 @@ class Motion:
         게이트를 먼저 열고 마스크를 기다리면, 그 사이 들어오는 프레임은
         무필터로 중계되어 그 물체의 voxel 이 그대로 박힌다 — 부분 삭제
         API가 없어서 한 번 박히면 이번 관찰에서는 영영 못 뺀다. timeout
-        안에 안 오면(감지 자체가 실패한 상황) 무한정 막아두는 것보다는
-        낫다고 보고 그냥 연다 — 이 경우 pick 자체가 곧 no_candidate 로
-        실패해서 어차피 재시도/에러 경로를 탄다.
+        안에 안 와도 mapping 상태는 열어 두되, cloud callback이 새 마스크가
+        없는 프레임을 버린다. 감지 실패가 대상 물체 voxel을 만들지는 않는다.
         """
         component = self._octomap_exclusion_component
         if component is None:
             return
         deadline = time.monotonic() + timeout_sec
-        while component not in self._latest_detection_masks:
+        while not Motion._has_fresh_exclusion_mask(self):
             if time.monotonic() >= deadline:
                 self.logger.warn(
                     f"옥토맵 예외 대기 타임아웃({timeout_sec}s): "
-                    f"component={component} 탐지가 안 와서 게이트를 그냥 연다"
+                    f"component={component} 새 탐지가 없음; 해당 cloud는 계속 버림"
                 )
                 return
             time.sleep(0.05)
