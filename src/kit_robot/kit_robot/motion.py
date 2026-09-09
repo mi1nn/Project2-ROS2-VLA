@@ -165,6 +165,34 @@ def _remove_outlier_points(xyz, voxel_size=0.01, min_neighbors=4):
     return keep
 
 
+def _flatten_floor_points(xyz, band_m=0.015, floor_percentile=5.0):
+    """Snap near-floor height wobble flat onto one reference height.
+
+    ``xyz`` must already be in a frame where z is "up" (base_frame) — the
+    eye-in-hand camera frame tilts with the arm, so a flat floor is not a
+    constant-z plane there. Grazing-angle depth quantization draws the floor
+    as a staircase of locally-coherent "shelves" — each shelf is internally
+    dense, so ``_remove_outlier_points`` (which only drops isolated points)
+    doesn't touch it. This instead assumes the floor/tray is the dominant,
+    lowest surface in view: the ``floor_percentile``-th lowest finite z is
+    taken as the true floor height, and any point within ``band_m`` of it is
+    pulled exactly onto that height. Points farther above it (real objects,
+    tray walls) are left untouched, so ``band_m`` must stay smaller than the
+    shortest real object that still needs to register as an obstacle.
+
+    Pure numpy so it can be checked without rclpy.
+    """
+    out = xyz.copy()
+    z = out[:, 2]
+    finite = np.isfinite(z)
+    if not np.any(finite):
+        return out
+    floor_z = np.percentile(z[finite], floor_percentile)
+    near_floor = finite & (np.abs(z - floor_z) <= band_m)
+    out[near_floor, 2] = floor_z
+    return out
+
+
 class Motion:
     """MoveIt2 based motion backend.
 
@@ -275,6 +303,18 @@ class Motion:
         )
         self.octomap_denoise_min_neighbors = int(
             self.octomap_config.get("denoise_min_neighbors", 4)
+        )
+        # 그레이징 앵글 계단 노이즈 펴기. _flatten_floor_points 참고 — band_m
+        # 은 실제로 장애물로 봐야 할 가장 낮은 물체보다 작아야 한다(지금
+        # 5cm 짜리 물체도 집어야 하므로 그보다 한참 작게 잡는다).
+        self.octomap_flatten_floor_enabled = bool(
+            self.octomap_config.get("flatten_floor_enabled", True)
+        )
+        self.octomap_flatten_band_m = float(
+            self.octomap_config.get("flatten_floor_band_m", 0.015)
+        )
+        self.octomap_flatten_percentile = float(
+            self.octomap_config.get("flatten_floor_percentile", 5.0)
         )
         # Links allowed to collide with octomap voxels: the gripper and what is
         # bolted to it. The target object and the table are voxels too, so
@@ -717,6 +757,41 @@ class Motion:
     def clear_octomap_exclusion(self):
         self._octomap_exclusion_component = None
 
+    def _flatten_floor_in_sensor_frame(self, xyz, header):
+        """Round-trip ``xyz`` through base_frame to flatten floor wobble,
+        then hand it back in the cloud's own (sensor) frame.
+
+        ``_flatten_floor_points`` needs z to mean "up", which only holds in
+        base_frame — the eye-in-hand camera frame tilts with every joint
+        move. TF lookup failure just skips flattening for this one frame
+        (denoise/exclusion below still run) rather than dropping the cloud.
+        """
+        try:
+            transform = self._tf_buffer.lookup_transform(
+                self.base_frame,
+                header.frame_id,
+                Time(),
+                timeout=Duration(seconds=self.tf_timeout),
+            )
+        except Exception as error:
+            self.logger.warn(
+                f"옥토맵 평면 펴기 TF 조회 실패, 이번 프레임은 건너뜀: {error}",
+                throttle_duration_sec=5.0,
+            )
+            return xyz
+
+        t = transform.transform.translation
+        q = transform.transform.rotation
+        translation = np.array([t.x, t.y, t.z], dtype=np.float64)
+        rotation = Rotation.from_quat([q.x, q.y, q.z, q.w])
+
+        base_xyz = rotation.apply(xyz.astype(np.float64)) + translation
+        flattened_base = _flatten_floor_points(
+            base_xyz, self.octomap_flatten_band_m, self.octomap_flatten_percentile
+        )
+        sensor_xyz = rotation.inv().apply(flattened_base - translation)
+        return sensor_xyz.astype(np.float32)
+
     def _filter_octomap_cloud(self, msg):
         """Denoise every relayed frame, and additionally drop the targeted
         component's YOLO mask from it while a pick exclusion is active.
@@ -748,8 +823,15 @@ class Motion:
             offset=offsets["x"],
         )
 
+        # 그레이징 앵글 계단 노이즈: 바닥/트레이 면 높이를 base_frame 기준
+        # 으로 눌러 편다. 원본 xyz(센서 프레임)는 건드리지 않고, 뒤에서
+        # kept 행만 이 보정값으로 덮어쓴다.
+        flat_xyz = xyz
+        if self.octomap_flatten_floor_enabled:
+            flat_xyz = self._flatten_floor_in_sensor_frame(xyz, msg.header)
+
         keep = _remove_outlier_points(
-            xyz, self.octomap_denoise_voxel_m, self.octomap_denoise_min_neighbors
+            flat_xyz, self.octomap_denoise_voxel_m, self.octomap_denoise_min_neighbors
         )
 
         if self._octomap_exclusion_component is not None:
@@ -766,7 +848,7 @@ class Motion:
                 )
             else:
                 keep &= _mask_cloud_polygon(
-                    xyz,
+                    flat_xyz,
                     masking_maps,
                     self._camera_intrinsics,
                     self._camera_width,
@@ -787,6 +869,20 @@ class Motion:
         raw = np.frombuffer(msg.data, dtype=np.uint8).reshape(
             n_points, msg.point_step
         )
+        filtered_raw = raw[keep]
+
+        if flat_xyz is not xyz:
+            # 평면 펴기로 좌표가 바뀐 경우, 살아남은 행의 x,y,z 바이트만
+            # 보정값으로 덮어쓴다. filtered_raw 는 불리언 인덱싱이 만든
+            # 새 배열(쓰기 가능)이라 msg.data 원본은 그대로 안전하다.
+            xyz_kept_view = np.ndarray(
+                (kept, 3),
+                dtype=np.float32,
+                buffer=filtered_raw,
+                strides=(msg.point_step, 4),
+                offset=offsets["x"],
+            )
+            xyz_kept_view[...] = flat_xyz[keep]
 
         filtered = PointCloud2()
         filtered.header = msg.header
@@ -797,7 +893,7 @@ class Motion:
         filtered.point_step = msg.point_step
         filtered.row_step = msg.point_step * filtered.width
         filtered.is_dense = msg.is_dense
-        filtered.data = raw[keep].tobytes()
+        filtered.data = filtered_raw.tobytes()
         return filtered
 
     def set_octomap_mapping(self, enabled):

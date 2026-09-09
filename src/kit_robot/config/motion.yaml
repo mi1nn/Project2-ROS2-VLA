@@ -50,6 +50,17 @@ motion:
       denoise_voxel_size_m: 0.01
       denoise_min_neighbors: 4
 
+      # 그레이징 앵글(눕혀서 보는 각도)에서는 depth 가 계단처럼 찍힌다 —
+      # 한 계단 안은 점들이 서로 다 동의(밀집)하므로 위 디노이즈로는 안
+      # 걸린다. base_frame 기준으로 가장 낮은 floor_percentile 번째 높이를
+      # "바닥"으로 보고, 그로부터 band_m 이내인 점만 그 높이로 눌러 편다
+      # (motion.py: _flatten_floor_points). band_m 은 반드시 지금 집어야
+      # 하는 가장 낮은 물체(5cm대)보다 작게 잡을 것 — band_m 이 그보다
+      # 크면 그 물체까지 바닥으로 눌려서 장애물로 안 잡힌다.
+      flatten_floor_enabled: true
+      flatten_floor_band_m: 0.015
+      flatten_floor_percentile: 5.0
+
       # 집으려는 물체와 테이블도 octomap 에는 그냥 장애물이다. 그리퍼가 물체
       # voxel 을 통과하지 못하면 파지 자체가 계획되지 않으므로, ACM 의
       # "<octomap>" 항목에서 아래 링크만 충돌 허용으로 바꾼다.

@@ -153,6 +153,28 @@ def test_remove_outlier_points_drops_isolated_points_keeps_dense_cluster():
     assert list(keep) == [True, True, True, True, True, False, False, False]
 
 
+def test_flatten_floor_points_snaps_wobble_keeps_tall_object():
+    """그레이징 앵글 계단(바닥 높이 흔들림)은 모두 같은 높이로 눌리고,
+    band_m 보다 훨씬 위에 있는 물체는 그대로 남는다.
+    """
+    np = pytest.importorskip("numpy")
+    motion = pytest.importorskip(
+        "kit_robot.motion", reason="ROS 런타임 없음 (로봇/도커에서 실행)"
+    )
+
+    # 바닥: 0.100~0.110m 사이에서 계단처럼 흔들리는 점 20개.
+    floor = [[float(i), 0.0, 0.10 + 0.005 * (i % 3)] for i in range(20)]
+    # 물체: 바닥보다 8cm 위 (band_m=0.015 를 훨씬 벗어남) -> 건드리지 않아야 함.
+    tall_object = [[0.0, 1.0, 0.18]]
+
+    xyz = np.array(floor + tall_object, dtype=np.float64)
+
+    out = motion._flatten_floor_points(xyz, band_m=0.015, floor_percentile=5.0)
+
+    assert len(np.unique(out[:20, 2])) == 1, "바닥 흔들림이 한 높이로 안 눌렸다"
+    assert out[20, 2] == xyz[20, 2], "band_m 밖 물체가 바닥으로 눌려버렸다"
+
+
 def test_mask_cloud_polygon_drops_projected_points_inside_mask():
     np = pytest.importorskip("numpy")
     pytest.importorskip("cv2")
