@@ -5,11 +5,13 @@ import threading
 import time
 import warnings
 
+import cv2
 import numpy as np
 import rclpy
 import yaml
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import Pose
+from kit_interfaces.msg import DetectionArray
 from moveit_msgs.action import ExecuteTrajectory, MoveGroup
 from moveit_msgs.msg import (
     AllowedCollisionEntry,
@@ -37,7 +39,7 @@ from rclpy.qos import (
     qos_profile_sensor_data,
 )
 from rclpy.time import Time
-from sensor_msgs.msg import PointCloud2
+from sensor_msgs.msg import CameraInfo, PointCloud2
 from shape_msgs.msg import SolidPrimitive
 from std_srvs.srv import Empty
 from visualization_msgs.msg import Marker
@@ -77,29 +79,43 @@ def merge_octomap_acm(entry_names, matrix, allowed_links):
     return names, matrix
 
 
-def _mask_cloud_sphere(data, point_step, x_offset, center, radius_m):
-    """Return a bool array: True for points to KEEP (outside the sphere).
+def _mask_cloud_polygon(xyz, polygon_px, intrinsics, width, height):
+    """Return a bool array: True for points to KEEP (outside the YOLO mask).
 
-    Pure buffer math so it can be checked without rclpy/sensor_msgs. NaN points
-    (already-invalid depth) are kept as-is (NaN comparisons are False, so the
-    `>` branch alone would drop them — the isnan OR-term keeps them instead).
+    ``xyz`` is Nx3 in the camera optical frame (any linear unit — the
+    projection is a ratio, so meters vs mm doesn't matter). ``polygon_px`` is
+    DetectedObject.masking_map, a flat [x0, y0, x1, y1, ...] pixel polygon in
+    the color image ``intrinsics`` belongs to. Points that can't be projected
+    (non-finite/non-positive depth, or landing outside the image) are kept —
+    better to occasionally leak one unmasked point than to silently carve out
+    unrelated geometry.
+
+    Pure buffer/geometry math so it can be checked without rclpy/sensor_msgs.
     """
-    n_points = len(data) // point_step
+    n_points = xyz.shape[0]
     if n_points == 0:
         return np.zeros(0, dtype=bool)
 
-    # ponytail: x,y,z 가 연속 float32 라고 가정한다 (RealSense 정렬 클라우드의
-    # 표준 레이아웃). 다른 레이아웃이면 여기서 조용히 틀린 값을 낸다.
-    xyz = np.ndarray(
-        (n_points, 3),
-        dtype=np.float32,
-        buffer=data,
-        strides=(point_step, 4),
-        offset=x_offset,
-    )
-    cx, cy, cz = center
-    dist_sq = (xyz[:, 0] - cx) ** 2 + (xyz[:, 1] - cy) ** 2 + (xyz[:, 2] - cz) ** 2
-    return np.isnan(dist_sq) | (dist_sq > radius_m * radius_m)
+    mask_image = np.zeros((height, width), dtype=np.uint8)
+    polygon = np.asarray(polygon_px, dtype=np.float32).reshape(-1, 2)
+    cv2.fillPoly(mask_image, [np.round(polygon).astype(np.int32)], 1)
+
+    z = xyz[:, 2]
+    projectable = np.isfinite(z) & (z > 0.0)
+
+    u = np.zeros(n_points, dtype=np.int64)
+    v = np.zeros(n_points, dtype=np.int64)
+    u[projectable] = np.round(
+        xyz[projectable, 0] / z[projectable] * intrinsics["fx"] + intrinsics["ppx"]
+    ).astype(np.int64)
+    v[projectable] = np.round(
+        xyz[projectable, 1] / z[projectable] * intrinsics["fy"] + intrinsics["ppy"]
+    ).astype(np.int64)
+
+    in_bounds = projectable & (u >= 0) & (u < width) & (v >= 0) & (v < height)
+    excluded = np.zeros(n_points, dtype=bool)
+    excluded[in_bounds] = mask_image[v[in_bounds], u[in_bounds]].astype(bool)
+    return ~excluded
 
 
 class Motion:
@@ -217,12 +233,10 @@ class Motion:
             )
         ]
         # 집을 물체 자체가 옥토맵에 박혀도, 위 ACM 면제는 그리퍼 링크까지만
-        # 풀어준다 — 손목/팔뚝 접근 경로는 여전히 막힌다. pick_component 가
-        # 물체 위치를 파낸 뒤(clear_octomap), place_component 가 트레이 지도를
-        # 복원한 뒤(move_to_inspection_pose) 각각 다시 짧게 스캔하는 정착 시간.
-        self.octomap_rescan_settle_sec = float(
-            self.octomap_config.get("rescan_settle_sec", 1.0)
-        )
+        # 풀어준다 — 손목/팔뚝 접근 경로는 여전히 막힌다. 부분 삭제 API가
+        # 없어서 한 번 voxel 로 박히면 못 빼므로, clear 대신 애초에 그 물체의
+        # YOLO 마스크에 해당하는 depth 포인트를 옥토맵으로 보내기 전에
+        # 걸러낸다 (_exclude_from_cloud / set_octomap_exclusion_component).
 
         self.server_timeout = float(
             self.moveit_config.get("server_ready_timeout_sec", 15.0)
@@ -310,8 +324,17 @@ class Motion:
         # Open by default so a run that never reaches the observation pose (or a
         # bringup without Controller) still shows a map in RViz.
         self._octomap_mapping = self.octomap_enabled
-        # 파낼 구(sphere): (base_link 기준 [x,y,z] m, 반지름 m) 또는 None.
-        self._octomap_exclusion = None
+        # 지금 옥토맵에서 빼고 있는 컴포넌트 이름(클래스명) 또는 None.
+        # Controller 가 move_to_observation_pose() 호출 *전에* 걸어야 한다 —
+        # 부분 삭제 API가 없어서, 게이트가 열리고 들어오는 첫 프레임부터 이미
+        # 이 물체의 voxel 이 박히기 시작한다.
+        self._octomap_exclusion_component = None
+        # class_name -> DetectedObject.masking_map (최신 1개만 유지).
+        self._latest_detection_masks = {}
+        # {"fx", "fy", "ppx", "ppy"} 또는 None (아직 camera_info 못 받음).
+        self._camera_intrinsics = None
+        self._camera_width = None
+        self._camera_height = None
         self._clear_octomap_client = None
         self._get_planning_scene_client = None
         if self.octomap_enabled:
@@ -332,6 +355,25 @@ class Motion:
                 PointCloud2,
                 self.octomap_cloud_in,
                 self._octomap_cloud_callback,
+                qos_profile_sensor_data,
+            )
+            # pick 위치에서 집을 물체의 YOLO 마스크를 옥토맵에서 걸러내려면
+            # 픽셀 폴리곤(masking_map)과 그걸 찍은 카메라의 intrinsics 가
+            # 둘 다 필요하다 — kit_vision object_detection.py 와 독립적으로,
+            # 여기서 바로 구독한다.
+            detection_qos = QoSProfile(
+                reliability=ReliabilityPolicy.BEST_EFFORT, depth=1
+            )
+            self._moveit_node.create_subscription(
+                DetectionArray,
+                "/detection/objects",
+                self._detection_callback,
+                detection_qos,
+            )
+            self._moveit_node.create_subscription(
+                CameraInfo,
+                "/camera/color/camera_info",
+                self._camera_info_callback,
                 qos_profile_sensor_data,
             )
 
@@ -584,46 +626,50 @@ class Motion:
     def _octomap_cloud_callback(self, msg):
         if not self._octomap_mapping:
             return
-        if self._octomap_exclusion is not None:
+        if self._octomap_exclusion_component is not None:
             msg = self._exclude_from_cloud(msg)
-            if msg is None:
-                return
         self._octomap_cloud_pub.publish(msg)
 
-    def set_octomap_exclusion(self, base_xyz_mm, radius_mm):
-        """Carve a sphere (base_link frame, mm) out of every relayed cloud
-        from now on, so the grasp target never re-enters the octomap as an
-        obstacle. Only affects future frames — call clear_octomap() right
-        after to drop whatever was already baked in from before this call.
+    def _detection_callback(self, msg):
+        for obj in msg.objects:
+            self._latest_detection_masks[obj.class_name] = list(obj.masking_map)
+
+    def _camera_info_callback(self, msg):
+        self._camera_intrinsics = {
+            "fx": float(msg.k[0]),
+            "fy": float(msg.k[4]),
+            "ppx": float(msg.k[2]),
+            "ppy": float(msg.k[5]),
+        }
+        self._camera_width = msg.width
+        self._camera_height = msg.height
+
+    def set_octomap_exclusion_component(self, component_name):
+        """Start dropping `component_name`'s YOLO mask from every relayed
+        cloud frame, from now on.
+
+        Call this *before* move_to_observation_pose(), not after — there is
+        no partial-octree erase, so any frame relayed before this runs can
+        still bake the object's voxels in permanently.
         """
         if not self.octomap_enabled:
             return
-        self._octomap_exclusion = (
-            [v / 1000.0 for v in base_xyz_mm],
-            radius_mm / 1000.0,
-        )
+        self._octomap_exclusion_component = component_name
 
     def clear_octomap_exclusion(self):
-        self._octomap_exclusion = None
+        self._octomap_exclusion_component = None
 
     def _exclude_from_cloud(self, msg):
-        """Drop points inside the active exclusion sphere from one cloud
-        message. Returns None (skip this frame) if the TF isn't available
-        yet — better to drop a frame than to leak an unfiltered one into the
-        octomap and re-plant the object we're trying to carve out.
+        """Drop points that project into the targeted component's YOLO mask
+        from one cloud frame. Falls through unfiltered if we don't have a
+        fresh detection or camera intrinsics yet for that class — better to
+        occasionally bake one early hit than to stop relaying entirely.
         """
-        center_base, radius_m = self._octomap_exclusion
-        try:
-            transform = self._tf_buffer.lookup_transform(
-                msg.header.frame_id, self.base_frame, Time()
-            )
-        except Exception:
-            return None
-
-        t = transform.transform.translation
-        q = transform.transform.rotation
-        rot = Rotation.from_quat([q.x, q.y, q.z, q.w])
-        center_cloud = rot.apply(center_base) + [t.x, t.y, t.z]
+        masking_map = self._latest_detection_masks.get(
+            self._octomap_exclusion_component
+        )
+        if masking_map is None or self._camera_intrinsics is None:
+            return msg
 
         offsets = {field.name: field.offset for field in msg.fields}
         if not {"x", "y", "z"} <= offsets.keys():
@@ -635,11 +681,22 @@ class Motion:
 
         # ponytail: x,y,z 가 연속 float32 라고 가정한다 (RealSense 정렬
         # 클라우드의 표준 레이아웃). 다른 레이아웃이면 이 assumption 이
-        # _mask_cloud_sphere 안에서 그냥 조용히 틀린 값을 낼 수 있다 —
+        # _mask_cloud_polygon 안에서 그냥 조용히 틀린 값을 낼 수 있다 —
         # sensors_3d.yaml 이 가리키는 토픽이 실제로 표준 XYZ 레이아웃인지
         # 의심되면 offsets 를 로그로 찍어서 확인할 것.
-        keep = _mask_cloud_sphere(
-            msg.data, msg.point_step, offsets["x"], center_cloud, radius_m
+        xyz = np.ndarray(
+            (n_points, 3),
+            dtype=np.float32,
+            buffer=msg.data,
+            strides=(msg.point_step, 4),
+            offset=offsets["x"],
+        )
+        keep = _mask_cloud_polygon(
+            xyz,
+            masking_map,
+            self._camera_intrinsics,
+            self._camera_width,
+            self._camera_height,
         )
         raw = np.frombuffer(msg.data, dtype=np.uint8).reshape(
             n_points, msg.point_step
@@ -1269,19 +1326,14 @@ class Motion:
             f"force={grip_force}, approach={approach_height}"
         )
 
-        # 옥토맵에는 지금 집으려는 물체 자체도 그냥 장애물로 박혀있다.
         # ACM은 그리퍼 링크만 옥토맵과 충돌 면제해서, 손목/팔뚝이 접근하는
-        # 경로까지는 못 풀어준다 — 물체가 있는 자리를 파내고 그 상태로
-        # 다시 짧게 스캔해서 그 자리만 비운 옥토맵으로 다시 채운다.
-        # clear_octomap() 은 맵 전체를 비운다(MoveIt에 부분 삭제 API가 없다) —
-        # pick 지역(observation_pose)과 place 지역(inspection_pose)은 서로
-        # 다른 곳이라, 여기서 지운 키팅 트레이 쪽 지도는 place_component() 가
-        # 시작할 때 스스로 복원한다.
-        if self.octomap_enabled:
-            exclusion_radius_mm = open_width / 20.0 + 30.0
-            self.set_octomap_exclusion(pose[:3], exclusion_radius_mm)
-            self.clear_octomap()
-            time.sleep(self.octomap_rescan_settle_sec)
+        # 경로까지는 못 풀어준다 — 그래서 이 물체의 YOLO 마스크에 해당하는
+        # depth 포인트는 옥토맵에 애초에 들어가지 않도록 걸러낸다(부분 삭제
+        # API가 없어서, 한 번 voxel로 박히면 clear_octomap()으로 맵 전체를
+        # 비우는 수밖에 없고, 그건 키팅 트레이 지도까지 같이 날린다).
+        # Controller가 move_to_observation_pose() 전에 이미 걸어뒀어야 첫
+        # 프레임부터 효과가 있다 — 여기서 또 거는 건 그게 빠졌을 때의 안전망.
+        self.set_octomap_exclusion_component(component_name)
 
         try:
             for attempt_index in range(5):
@@ -1331,14 +1383,6 @@ class Motion:
         # PLACE 목표 위치보다 Z 방향으로 approach_height만큼 높은 안전 위치.
         place_pose_up = place_pose_down.copy()
         place_pose_up[2] += approach_height
-
-        # pick_component() 가 방금 clear_octomap() 으로 맵 전체를 비웠다
-        # (물체를 파내려면 부분 삭제가 아니라 전체 클리어밖에 방법이 없다).
-        # 여기서 트레이(inspection_pose)를 다시 보고 정착해야, 이미 놓인
-        # 다른 물체나 트레이 벽을 다시 장애물로 인식한 채로 슬롯에 들어간다.
-        if self.octomap_enabled:
-            self.move_to_inspection_pose()
-            time.sleep(self.octomap_rescan_settle_sec)
 
         # ---------------------------------------------------------
         # PLACE 좌표 확인

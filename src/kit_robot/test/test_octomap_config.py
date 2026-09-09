@@ -129,28 +129,28 @@ def test_merge_octomap_acm_keeps_existing_pairs():
     assert again == merged
 
 
-def test_mask_cloud_sphere_drops_points_inside_radius_and_keeps_nan():
+def test_mask_cloud_polygon_drops_projected_points_inside_mask():
     np = pytest.importorskip("numpy")
+    pytest.importorskip("cv2")
     motion = pytest.importorskip(
         "kit_robot.motion", reason="ROS 런타임 없음 (로봇/도커에서 실행)"
     )
 
-    # point_step=16: x,y,z(float32) + 1 float32 패딩(intensity 등 대체용).
-    point_step = 16
-    x_offset = 0
-    points = np.array(
+    intrinsics = {"fx": 100.0, "fy": 100.0, "ppx": 50.0, "ppy": 50.0}
+    polygon_px = [30, 30, 70, 30, 70, 70, 30, 70]  # 픽셀 30~70 정사각형
+
+    xyz = np.array(
         [
-            [0.0, 0.0, 0.0, 0.0],   # 구 중심 -> 제거
-            [0.05, 0.0, 0.0, 0.0],  # 반지름(0.1m) 안 -> 제거
-            [1.0, 0.0, 0.0, 0.0],   # 반지름 밖 -> 보존
-            [np.nan, np.nan, np.nan, 0.0],  # 무효 depth -> 항상 보존
+            [0.0, 0.0, 1.0],   # (u,v)=(50,50) -> 폴리곤 안 -> 제거
+            [0.5, 0.0, 1.0],   # (u,v)=(100,50) -> 이미지 밖(width=100) -> 보존
+            [0.0, 0.0, 0.0],   # depth<=0, 투영 불가 -> 보존
+            [np.nan, np.nan, np.nan],  # 무효 depth -> 보존
         ],
         dtype=np.float32,
     )
-    data = points.tobytes()
 
-    keep = motion._mask_cloud_sphere(
-        data, point_step, x_offset, center=(0.0, 0.0, 0.0), radius_m=0.1
+    keep = motion._mask_cloud_polygon(
+        xyz, polygon_px, intrinsics, width=100, height=100
     )
 
-    assert list(keep) == [False, False, True, True]
+    assert list(keep) == [False, True, True, True]

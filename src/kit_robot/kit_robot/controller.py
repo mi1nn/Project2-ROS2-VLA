@@ -383,8 +383,13 @@ class Controller(Node):
 
     def _enter_observation_pose(self):
         '''관찰 자세로 이동하고 좌표 요청 정착 대기를 시작한다. 실패 시 REPORT로 전환.'''
+        component = self.components[self.component_index]
         try:
             self.motion_started = True
+            # octomap 게이트가 열리기 *전에* 걸어야 한다 — 부분 삭제 API가
+            # 없어서, 게이트가 열리고 들어오는 첫 프레임부터 이 물체의 voxel이
+            # 박히기 시작하면 다시는 못 뺀다.
+            self.motion.set_octomap_exclusion_component(component.name)
             self.motion.move_to_observation_pose()
         except Exception as error:
             self.task_fatal = True
