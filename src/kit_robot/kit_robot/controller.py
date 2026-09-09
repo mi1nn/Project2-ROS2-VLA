@@ -270,6 +270,9 @@ class Controller(Node):
         # 이 스냅샷을 그대로 재사용한다 — 매 EXECUTE마다 inspect 자세를 다시
         # 왕복하지 않는다.
         self.place_octomap_ready = False
+        # tray 도착 직후 게이트를 열어봐야 카메라 프레임이 아직 안 들어온 상태다.
+        # None이 아니면 "정착 대기 중" — 이 시각이 지나야 관찰 자세로 넘어간다.
+        self.place_octomap_settle_at = None
 
         # 현재 작업에서 발행한 index 집합. DB 저장 완료를 확인하는 장치는 아니다.
         self.published_component_indices = set()
@@ -378,6 +381,26 @@ class Controller(Node):
         )
 
 
+    def _enter_observation_pose(self):
+        '''관찰 자세로 이동하고 좌표 요청 정착 대기를 시작한다. 실패 시 REPORT로 전환.'''
+        try:
+            self.motion_started = True
+            self.motion.move_to_observation_pose()
+        except Exception as error:
+            self.task_fatal = True
+            self.error_code = "observation_move_failed"
+            self.detail = str(error)
+            self.transition_to(
+                State.REPORT,
+                TransitionCategory.TASK_FATAL,
+                f"관찰 자세 이동 실패: {self.error_code}, {self.detail}",
+            )
+            return
+
+        self.pose_ready_at = (
+            time.monotonic() + self.observation_settle
+        )
+
     def handle_observe(self, entered: bool):
         '''시도를 시작해 관찰 자세로 이동하고 정착 후 좌표 요청과 응답 확인을 진행한다.'''
         if entered:
@@ -399,35 +422,39 @@ class Controller(Node):
             self.service_ready_deadline = None
             self.request_deadline = None
 
-            try:
-                # 호출 도중 실패해도 복구 검토 대상이 되도록 먼저 표시
-                self.motion_started = True
-
-                if not self.place_octomap_ready:
-                    # 작업당 한 번: place 위치를 먼저 보고 와서 장애물 회피용
-                    # octomap을 만든다. 이후 컴포넌트는 이 스냅샷을 재사용한다.
+            if not self.place_octomap_ready:
+                # 작업당 한 번: place 위치를 먼저 보고 와서 장애물 회피용
+                # octomap을 만든다. 여기서 바로 관찰 자세로 넘어가면 move_pose가
+                # 시작하자마자 게이트를 닫아버려 voxel이 하나도 안 쌓인다 — 아래
+                # entered=False 쪽에서 정착 시간만큼 기다렸다가 넘어간다.
+                try:
+                    self.motion_started = True
                     self.motion.move_to_inspection_pose()
-                    self.place_octomap_ready = True
+                except Exception as error:
+                    self.task_fatal = True
+                    self.error_code = "initial_octomap_scan_failed"
+                    self.detail = str(error)
+                    self.transition_to(
+                        State.REPORT,
+                        TransitionCategory.TASK_FATAL,
+                        f"관찰 자세 이동 실패: {self.error_code}, {self.detail}",
+                    )
+                    return
 
-                self.motion.move_to_observation_pose()
-            except Exception as error:
-                self.task_fatal = True
-                self.error_code = (
-                    "initial_octomap_scan_failed"
-                    if not self.place_octomap_ready
-                    else "observation_move_failed"
-                )
-                self.detail = str(error)
-                self.transition_to(
-                    State.REPORT,
-                    TransitionCategory.TASK_FATAL,
-                    f"관찰 자세 이동 실패: {self.error_code}, {self.detail}",
+                self.place_octomap_settle_at = (
+                    time.monotonic() + self.observation_settle
                 )
                 return
 
-            self.pose_ready_at = (
-                time.monotonic() + self.observation_settle
-            )
+            self._enter_observation_pose()
+            return
+
+        if self.place_octomap_settle_at is not None:
+            if time.monotonic() < self.place_octomap_settle_at:
+                return
+            self.place_octomap_ready = True
+            self.place_octomap_settle_at = None
+            self._enter_observation_pose()
             return
 
         if time.monotonic() < self.pose_ready_at:
