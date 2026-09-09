@@ -434,7 +434,10 @@ class Controller(Node):
                 # entered=False 쪽에서 정착 시간만큼 기다렸다가 넘어간다.
                 try:
                     self.motion_started = True
-                    self.motion.move_to_inspection_pose()
+                    # 이전 작업(특히 실패로 끝난 작업)의 octomap이 그대로 남아
+                    # 있으면 이 최초 이동 자체가 그 잔여 voxel에 막혀 계획이
+                    # 안 나온다 — 새 작업의 첫 이동이므로 지우고 움직인다.
+                    self.motion.move_to_inspection_pose(clear_before=True)
                 except Exception as error:
                     self.task_fatal = True
                     self.error_code = "initial_octomap_scan_failed"

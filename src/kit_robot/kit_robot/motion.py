@@ -1281,11 +1281,25 @@ class Motion:
                 return
             time.sleep(0.05)
 
-    def move_to_inspection_pose(self):
+    def move_to_inspection_pose(self, clear_before=False):
         # Clearing refresh: used once per task by Controller (before the first
         # observation, to seed the place-area map) and once more at the very end
-        # (final inspection). Both times nothing else has planned against stale
-        # voxels since the last clear, so wiping and rebuilding here is safe.
+        # (final inspection). The end-of-task call keeps moving against the
+        # *current* map (clear_before=False) — those voxels are this task's own
+        # placed components, still real obstacles for that move.
+        #
+        # The once-per-task first call is different: it's the very first move
+        # of a brand new task, and the map it would otherwise plan against is
+        # whatever the *previous* task's octomap left behind (a failed pick,
+        # a picked-up ghost voxel, ...) — garbage this task never built and
+        # has no way to know about. Clearing before that move, not just after,
+        # is what actually fixes "새 작업인데 이전 작업 octomap 때문에 여기로
+        # 못 움직임": otherwise the plan to inspection_pose can be blocked by
+        # stale voxels that clear_octomap() only wipes *after* the move already
+        # failed. Safe to clear first here — the gate is closed for the whole
+        # move (see move_joint), so nothing new bakes in between.
+        if clear_before:
+            self.clear_octomap()
         result = self._move_named_position("inspection_pose")
         self.clear_octomap()
         self.set_octomap_mapping(True)
