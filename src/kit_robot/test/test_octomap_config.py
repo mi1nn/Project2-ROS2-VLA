@@ -130,6 +130,29 @@ def test_merge_octomap_acm_keeps_existing_pairs():
     assert again == merged
 
 
+def test_remove_outlier_points_drops_isolated_points_keeps_dense_cluster():
+    """대충 rung 흘려보낸 한 점(flying pixel)은 버리고, 같은 자리에 몰린
+    "진짜 표면" 점들은 남긴다. voxel/octomap 부분삭제가 없으니, 이 단계에서
+    안 걸러지면 그 점 하나가 영구 장애물이 된다.
+    """
+    np = pytest.importorskip("numpy")
+    motion = pytest.importorskip(
+        "kit_robot.motion", reason="ROS 런타임 없음 (로봇/도커에서 실행)"
+    )
+
+    # voxel_size=0.01, min_neighbors=4 기준.
+    # 같은 voxel(0,0,0)에 몰린 점 5개(밀집 표면) + 멀리 떨어진 고립점 1개(플라잉 픽셀).
+    dense_cluster = [[0.001 * i, 0.0, 1.0] for i in range(5)]
+    stray = [[5.0, 5.0, 1.0]]
+    invalid = [[np.nan, 0.0, 1.0], [0.0, 0.0, -1.0]]  # 무효 depth -> 무조건 버림
+
+    xyz = np.array(dense_cluster + stray + invalid, dtype=np.float32)
+
+    keep = motion._remove_outlier_points(xyz, voxel_size=0.01, min_neighbors=4)
+
+    assert list(keep) == [True, True, True, True, True, False, False, False]
+
+
 def test_mask_cloud_polygon_drops_projected_points_inside_mask():
     np = pytest.importorskip("numpy")
     pytest.importorskip("cv2")

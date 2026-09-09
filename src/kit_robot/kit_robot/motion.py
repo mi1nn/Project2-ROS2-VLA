@@ -126,6 +126,45 @@ def _mask_cloud_polygon(xyz, polygons_px, intrinsics, width, height):
     return ~excluded
 
 
+def _remove_outlier_points(xyz, voxel_size=0.01, min_neighbors=4):
+    """Return a bool keep-mask that drops sparse "flying pixel" noise.
+
+    A real surface (table, tray, object) returns a locally dense cluster of
+    points; a depth-sensor flying pixel — the classic stray return at an
+    object edge, floating between foreground and background — sits alone in
+    its neighborhood. Bucket points into a coarse voxel grid and keep only
+    points whose bucket holds at least ``min_neighbors`` points total
+    (including itself); this both flattens edge scatter onto whichever real
+    surface it's nearest to and drops isolated outliers outright. NaN/Inf/
+    non-positive-depth points are dropped unconditionally.
+
+    ``voxel_size`` should be a few mm to a cm or so — coarser than
+    ``octomap_resolution`` (this filters points, not the octree itself) but
+    fine enough not to merge separate objects into one bucket.
+
+    Pure buffer/geometry math so it can be checked without rclpy/sensor_msgs.
+    """
+    n_points = xyz.shape[0]
+    keep = np.zeros(n_points, dtype=bool)
+    if n_points == 0:
+        return keep
+
+    finite = np.all(np.isfinite(xyz), axis=1) & (xyz[:, 2] > 0.0)
+    if not np.any(finite):
+        return keep
+
+    # Hash each voxel to one int64 key instead of np.unique(..., axis=0),
+    # which is far slower at cloud-sized point counts. OFFSET keeps indices
+    # non-negative and comfortably covers D435's few-meter range at any
+    # sane voxel_size.
+    OFFSET = 1 << 16
+    idx = np.floor(xyz[finite] / voxel_size).astype(np.int64) + OFFSET
+    keys = (idx[:, 0] * OFFSET + idx[:, 1]) * OFFSET + idx[:, 2]
+    _, inverse, counts = np.unique(keys, return_inverse=True, return_counts=True)
+    keep[finite] = counts[inverse] >= min_neighbors
+    return keep
+
+
 class Motion:
     """MoveIt2 based motion backend.
 
@@ -230,6 +269,13 @@ class Motion:
                 "get_planning_scene_service", "/dsr01/get_planning_scene"
             )
         )
+        # 옥토맵으로 들어가기 전 클라우드 디노이즈 파라미터. _remove_outlier_points 참고.
+        self.octomap_denoise_voxel_m = float(
+            self.octomap_config.get("denoise_voxel_size_m", 0.01)
+        )
+        self.octomap_denoise_min_neighbors = int(
+            self.octomap_config.get("denoise_min_neighbors", 4)
+        )
         # Links allowed to collide with octomap voxels: the gripper and what is
         # bolted to it. The target object and the table are voxels too, so
         # without this no grasp is ever plannable. Upper arm links stay out.
@@ -244,7 +290,7 @@ class Motion:
         # 풀어준다 — 손목/팔뚝 접근 경로는 여전히 막힌다. 부분 삭제 API가
         # 없어서 한 번 voxel 로 박히면 못 빼므로, clear 대신 애초에 그 물체의
         # YOLO 마스크에 해당하는 depth 포인트를 옥토맵으로 보내기 전에
-        # 걸러낸다 (_exclude_from_cloud / set_octomap_exclusion_component).
+        # 걸러낸다 (_filter_octomap_cloud / set_octomap_exclusion_component).
 
         self.server_timeout = float(
             self.moveit_config.get("server_ready_timeout_sec", 15.0)
@@ -634,9 +680,7 @@ class Motion:
     def _octomap_cloud_callback(self, msg):
         if not self._octomap_mapping:
             return
-        if self._octomap_exclusion_component is not None:
-            msg = self._exclude_from_cloud(msg)
-        self._octomap_cloud_pub.publish(msg)
+        self._octomap_cloud_pub.publish(self._filter_octomap_cloud(msg))
 
     def _detection_callback(self, msg):
         # class_name 하나에 인스턴스가 여러 개일 수 있다(같은 품목 2개 이상).
@@ -673,25 +717,16 @@ class Motion:
     def clear_octomap_exclusion(self):
         self._octomap_exclusion_component = None
 
-    def _exclude_from_cloud(self, msg):
-        """Drop points that project into the targeted component's YOLO mask
-        from one cloud frame. Falls through unfiltered if we don't have a
-        fresh detection or camera intrinsics yet for that class — better to
-        occasionally bake one early hit than to stop relaying entirely.
-        """
-        masking_maps = self._latest_detection_masks.get(
-            self._octomap_exclusion_component
-        )
-        if not masking_maps or self._camera_intrinsics is None:
-            self.logger.warn(
-                "옥토맵 예외 미적용(원본 그대로 중계): "
-                f"component={self._octomap_exclusion_component}, "
-                f"mask={'없음' if not masking_maps else '있음'}, "
-                f"intrinsics={'없음' if self._camera_intrinsics is None else '있음'}",
-                throttle_duration_sec=2.0,
-            )
-            return msg
+    def _filter_octomap_cloud(self, msg):
+        """Denoise every relayed frame, and additionally drop the targeted
+        component's YOLO mask from it while a pick exclusion is active.
 
+        Denoising always runs, not just during pick exclusion — a flying-
+        pixel edge point bakes into the octomap exactly like a real object
+        does (single hit -> occupied, no partial erase), so a stray point in
+        mid-air during any observation is just as permanent as the object
+        it's mistaken for.
+        """
         offsets = {field.name: field.offset for field in msg.fields}
         if not {"x", "y", "z"} <= offsets.keys():
             return msg  # 예상 못한 필드 구성이면 거르지 않고 그냥 흘려보낸다
@@ -702,9 +737,9 @@ class Motion:
 
         # ponytail: x,y,z 가 연속 float32 라고 가정한다 (RealSense 정렬
         # 클라우드의 표준 레이아웃). 다른 레이아웃이면 이 assumption 이
-        # _mask_cloud_polygon 안에서 그냥 조용히 틀린 값을 낼 수 있다 —
-        # sensors_3d.yaml 이 가리키는 토픽이 실제로 표준 XYZ 레이아웃인지
-        # 의심되면 offsets 를 로그로 찍어서 확인할 것.
+        # _mask_cloud_polygon/_remove_outlier_points 안에서 그냥 조용히
+        # 틀린 값을 낼 수 있다 — sensors_3d.yaml 이 가리키는 토픽이 실제로
+        # 표준 XYZ 레이아웃인지 의심되면 offsets 를 로그로 찍어서 확인할 것.
         xyz = np.ndarray(
             (n_points, 3),
             dtype=np.float32,
@@ -712,20 +747,42 @@ class Motion:
             strides=(msg.point_step, 4),
             offset=offsets["x"],
         )
-        keep = _mask_cloud_polygon(
-            xyz,
-            masking_maps,
-            self._camera_intrinsics,
-            self._camera_width,
-            self._camera_height,
+
+        keep = _remove_outlier_points(
+            xyz, self.octomap_denoise_voxel_m, self.octomap_denoise_min_neighbors
         )
+
+        if self._octomap_exclusion_component is not None:
+            masking_maps = self._latest_detection_masks.get(
+                self._octomap_exclusion_component
+            )
+            if not masking_maps or self._camera_intrinsics is None:
+                self.logger.warn(
+                    "옥토맵 예외 미적용(디노이즈만 적용): "
+                    f"component={self._octomap_exclusion_component}, "
+                    f"mask={'없음' if not masking_maps else '있음'}, "
+                    f"intrinsics={'없음' if self._camera_intrinsics is None else '있음'}",
+                    throttle_duration_sec=2.0,
+                )
+            else:
+                keep &= _mask_cloud_polygon(
+                    xyz,
+                    masking_maps,
+                    self._camera_intrinsics,
+                    self._camera_width,
+                    self._camera_height,
+                )
+                self.logger.info(
+                    "옥토맵 예외 적용: "
+                    f"component={self._octomap_exclusion_component}, "
+                    f"instances={len(masking_maps)}",
+                    throttle_duration_sec=2.0,
+                )
+
         kept = int(np.count_nonzero(keep))
         self.logger.info(
-            "옥토맵 예외 적용: "
-            f"component={self._octomap_exclusion_component}, "
-            f"instances={len(masking_maps)}, "
-            f"total={n_points}, kept={kept}, dropped={n_points - kept}",
-            throttle_duration_sec=2.0,
+            f"옥토맵 디노이즈: total={n_points}, kept={kept}, dropped={n_points - kept}",
+            throttle_duration_sec=5.0,
         )
         raw = np.frombuffer(msg.data, dtype=np.uint8).reshape(
             n_points, msg.point_step
@@ -734,7 +791,7 @@ class Motion:
         filtered = PointCloud2()
         filtered.header = msg.header
         filtered.height = 1
-        filtered.width = int(np.count_nonzero(keep))
+        filtered.width = kept
         filtered.fields = msg.fields
         filtered.is_bigendian = msg.is_bigendian
         filtered.point_step = msg.point_step

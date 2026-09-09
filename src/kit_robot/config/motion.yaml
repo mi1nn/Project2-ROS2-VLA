@@ -39,6 +39,17 @@ motion:
       clear_service: "/dsr01/clear_octomap"
       get_planning_scene_service: "/dsr01/get_planning_scene"
 
+      # RealSense 클라우드에는 물체 가장자리에서 튀는 "flying pixel"(전경도
+      # 배경도 아닌 허공의 점) 노이즈가 섞여 있다. 옥토맵은 부분 삭제가
+      # 없어서 단 한 프레임의 튄 점도 영구히 voxel 로 박힌다 — 관찰 자세에서
+      # 손을 넣으면 voxel 이 생겼다가 손을 빼도 1분 넘게 안 지워지는 증상이
+      # 바로 이거다. 옥토맵으로 보내기 전에 매 프레임 이 격자 안 이웃 점
+      # 개수로 이상치를 거른다(motion.py: _remove_outlier_points).
+      # voxel_size 를 키우면(느슨해지면) 더 많이 살아남고, min_neighbors 를
+      # 키우면 더 빡빡하게 걸러진다.
+      denoise_voxel_size_m: 0.01
+      denoise_min_neighbors: 4
+
       # 집으려는 물체와 테이블도 octomap 에는 그냥 장애물이다. 그리퍼가 물체
       # voxel 을 통과하지 못하면 파지 자체가 계획되지 않으므로, ACM 의
       # "<octomap>" 항목에서 아래 링크만 충돌 허용으로 바꾼다.
