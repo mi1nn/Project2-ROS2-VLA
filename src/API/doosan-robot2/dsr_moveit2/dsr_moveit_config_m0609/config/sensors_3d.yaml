@@ -32,5 +32,6 @@ realsense_d435:
 # 고정 프레임이어야 한다. keepout box 와 같은 frame 을 쓴다(motion.yaml: moveit.base_frame).
 octomap_frame: base_link
 
-# 15 mm voxel. 컵라면/양갱 정도는 형상이 남고 1.2 m 작업영역이면 CPU 도 버틴다.
-octomap_resolution: 0.015
+# 8 mm voxel. 양갱처럼 얇은 물체도 형상이 남게 15mm에서 낮춤 — voxel 수는
+# 세제곱으로 늘어나니(15mm 대비 약 6.6배) CPU/업데이트 지연 체감되면 여기부터 올릴 것.
+octomap_resolution: 0.008
