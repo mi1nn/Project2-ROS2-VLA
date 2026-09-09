@@ -127,3 +127,30 @@ def test_merge_octomap_acm_keeps_existing_pairs():
     )
     assert again_names == merged_names
     assert again == merged
+
+
+def test_mask_cloud_sphere_drops_points_inside_radius_and_keeps_nan():
+    np = pytest.importorskip("numpy")
+    motion = pytest.importorskip(
+        "kit_robot.motion", reason="ROS 런타임 없음 (로봇/도커에서 실행)"
+    )
+
+    # point_step=16: x,y,z(float32) + 1 float32 패딩(intensity 등 대체용).
+    point_step = 16
+    x_offset = 0
+    points = np.array(
+        [
+            [0.0, 0.0, 0.0, 0.0],   # 구 중심 -> 제거
+            [0.05, 0.0, 0.0, 0.0],  # 반지름(0.1m) 안 -> 제거
+            [1.0, 0.0, 0.0, 0.0],   # 반지름 밖 -> 보존
+            [np.nan, np.nan, np.nan, 0.0],  # 무효 depth -> 항상 보존
+        ],
+        dtype=np.float32,
+    )
+    data = points.tobytes()
+
+    keep = motion._mask_cloud_sphere(
+        data, point_step, x_offset, center=(0.0, 0.0, 0.0), radius_m=0.1
+    )
+
+    assert list(keep) == [False, False, True, True]

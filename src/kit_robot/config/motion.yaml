@@ -39,6 +39,11 @@ motion:
       clear_service: "/dsr01/clear_octomap"
       get_planning_scene_service: "/dsr01/get_planning_scene"
 
+      # clear_octomap() 은 맵 전체를 비운다 (부분 삭제 API가 없다). pick_component
+      # 가 집을 물체 자리를 파낸 뒤, place_component 가 트레이 지도를 복원한 뒤
+      # 각각 다시 스캔하고 기다리는 정착 시간.
+      rescan_settle_sec: 1.0
+
       # 집으려는 물체와 테이블도 octomap 에는 그냥 장애물이다. 그리퍼가 물체
       # voxel 을 통과하지 못하면 파지 자체가 계획되지 않으므로, ACM 의
       # "<octomap>" 항목에서 아래 링크만 충돌 허용으로 바꾼다.

@@ -5,6 +5,7 @@ import threading
 import time
 import warnings
 
+import numpy as np
 import rclpy
 import yaml
 from ament_index_python.packages import get_package_share_directory
@@ -74,6 +75,31 @@ def merge_octomap_acm(entry_names, matrix, allowed_links):
         matrix[index][octomap_index] = True
 
     return names, matrix
+
+
+def _mask_cloud_sphere(data, point_step, x_offset, center, radius_m):
+    """Return a bool array: True for points to KEEP (outside the sphere).
+
+    Pure buffer math so it can be checked without rclpy/sensor_msgs. NaN points
+    (already-invalid depth) are kept as-is (NaN comparisons are False, so the
+    `>` branch alone would drop them — the isnan OR-term keeps them instead).
+    """
+    n_points = len(data) // point_step
+    if n_points == 0:
+        return np.zeros(0, dtype=bool)
+
+    # ponytail: x,y,z 가 연속 float32 라고 가정한다 (RealSense 정렬 클라우드의
+    # 표준 레이아웃). 다른 레이아웃이면 여기서 조용히 틀린 값을 낸다.
+    xyz = np.ndarray(
+        (n_points, 3),
+        dtype=np.float32,
+        buffer=data,
+        strides=(point_step, 4),
+        offset=x_offset,
+    )
+    cx, cy, cz = center
+    dist_sq = (xyz[:, 0] - cx) ** 2 + (xyz[:, 1] - cy) ** 2 + (xyz[:, 2] - cz) ** 2
+    return np.isnan(dist_sq) | (dist_sq > radius_m * radius_m)
 
 
 class Motion:
@@ -190,6 +216,13 @@ class Motion:
                 ["link_6", "tool0", "rg2_base_link"],
             )
         ]
+        # 집을 물체 자체가 옥토맵에 박혀도, 위 ACM 면제는 그리퍼 링크까지만
+        # 풀어준다 — 손목/팔뚝 접근 경로는 여전히 막힌다. pick_component 가
+        # 물체 위치를 파낸 뒤(clear_octomap), place_component 가 트레이 지도를
+        # 복원한 뒤(move_to_inspection_pose) 각각 다시 짧게 스캔하는 정착 시간.
+        self.octomap_rescan_settle_sec = float(
+            self.octomap_config.get("rescan_settle_sec", 1.0)
+        )
 
         self.server_timeout = float(
             self.moveit_config.get("server_ready_timeout_sec", 15.0)
@@ -277,6 +310,8 @@ class Motion:
         # Open by default so a run that never reaches the observation pose (or a
         # bringup without Controller) still shows a map in RViz.
         self._octomap_mapping = self.octomap_enabled
+        # 파낼 구(sphere): (base_link 기준 [x,y,z] m, 반지름 m) 또는 None.
+        self._octomap_exclusion = None
         self._clear_octomap_client = None
         self._get_planning_scene_client = None
         if self.octomap_enabled:
@@ -547,8 +582,80 @@ class Motion:
     # ------------------------------------------------------------------
 
     def _octomap_cloud_callback(self, msg):
-        if self._octomap_mapping:
-            self._octomap_cloud_pub.publish(msg)
+        if not self._octomap_mapping:
+            return
+        if self._octomap_exclusion is not None:
+            msg = self._exclude_from_cloud(msg)
+            if msg is None:
+                return
+        self._octomap_cloud_pub.publish(msg)
+
+    def set_octomap_exclusion(self, base_xyz_mm, radius_mm):
+        """Carve a sphere (base_link frame, mm) out of every relayed cloud
+        from now on, so the grasp target never re-enters the octomap as an
+        obstacle. Only affects future frames — call clear_octomap() right
+        after to drop whatever was already baked in from before this call.
+        """
+        if not self.octomap_enabled:
+            return
+        self._octomap_exclusion = (
+            [v / 1000.0 for v in base_xyz_mm],
+            radius_mm / 1000.0,
+        )
+
+    def clear_octomap_exclusion(self):
+        self._octomap_exclusion = None
+
+    def _exclude_from_cloud(self, msg):
+        """Drop points inside the active exclusion sphere from one cloud
+        message. Returns None (skip this frame) if the TF isn't available
+        yet — better to drop a frame than to leak an unfiltered one into the
+        octomap and re-plant the object we're trying to carve out.
+        """
+        center_base, radius_m = self._octomap_exclusion
+        try:
+            transform = self._tf_buffer.lookup_transform(
+                msg.header.frame_id, self.base_frame, Time()
+            )
+        except Exception:
+            return None
+
+        t = transform.transform.translation
+        q = transform.transform.rotation
+        rot = Rotation.from_quat([q.x, q.y, q.z, q.w])
+        center_cloud = rot.apply(center_base) + [t.x, t.y, t.z]
+
+        offsets = {field.name: field.offset for field in msg.fields}
+        if not {"x", "y", "z"} <= offsets.keys():
+            return msg  # 예상 못한 필드 구성이면 거르지 않고 그냥 흘려보낸다
+
+        n_points = len(msg.data) // msg.point_step
+        if n_points == 0:
+            return msg
+
+        # ponytail: x,y,z 가 연속 float32 라고 가정한다 (RealSense 정렬
+        # 클라우드의 표준 레이아웃). 다른 레이아웃이면 이 assumption 이
+        # _mask_cloud_sphere 안에서 그냥 조용히 틀린 값을 낼 수 있다 —
+        # sensors_3d.yaml 이 가리키는 토픽이 실제로 표준 XYZ 레이아웃인지
+        # 의심되면 offsets 를 로그로 찍어서 확인할 것.
+        keep = _mask_cloud_sphere(
+            msg.data, msg.point_step, offsets["x"], center_cloud, radius_m
+        )
+        raw = np.frombuffer(msg.data, dtype=np.uint8).reshape(
+            n_points, msg.point_step
+        )
+
+        filtered = PointCloud2()
+        filtered.header = msg.header
+        filtered.height = 1
+        filtered.width = int(np.count_nonzero(keep))
+        filtered.fields = msg.fields
+        filtered.is_bigendian = msg.is_bigendian
+        filtered.point_step = msg.point_step
+        filtered.row_step = msg.point_step * filtered.width
+        filtered.is_dense = msg.is_dense
+        filtered.data = raw[keep].tobytes()
+        return filtered
 
     def set_octomap_mapping(self, enabled):
         """Open/close the point-cloud gate that feeds MoveIt's octomap.
@@ -1162,35 +1269,54 @@ class Motion:
             f"force={grip_force}, approach={approach_height}"
         )
 
-        for attempt_index in range(5):
-            self.rg.move_gripper(open_width, force_val=grip_force)
-            time.sleep(2.0)
+        # 옥토맵에는 지금 집으려는 물체 자체도 그냥 장애물로 박혀있다.
+        # ACM은 그리퍼 링크만 옥토맵과 충돌 면제해서, 손목/팔뚝이 접근하는
+        # 경로까지는 못 풀어준다 — 물체가 있는 자리를 파내고 그 상태로
+        # 다시 짧게 스캔해서 그 자리만 비운 옥토맵으로 다시 채운다.
+        # clear_octomap() 은 맵 전체를 비운다(MoveIt에 부분 삭제 API가 없다) —
+        # pick 지역(observation_pose)과 place 지역(inspection_pose)은 서로
+        # 다른 곳이라, 여기서 지운 키팅 트레이 쪽 지도는 place_component() 가
+        # 시작할 때 스스로 복원한다.
+        if self.octomap_enabled:
+            exclusion_radius_mm = open_width / 20.0 + 30.0
+            self.set_octomap_exclusion(pose[:3], exclusion_radius_mm)
+            self.clear_octomap()
+            time.sleep(self.octomap_rescan_settle_sec)
 
-            self.move_pose(pick_pose_up)
-            time.sleep(0.5)
-            self.move_linear(pick_pose_down, vel=vel, acc=acc)
+        try:
+            for attempt_index in range(5):
+                self.rg.move_gripper(open_width, force_val=grip_force)
+                time.sleep(2.0)
 
-            self.rg.close_gripper(force_val=grip_force)
-            time.sleep(5.0)
+                self.move_pose(pick_pose_up)
+                time.sleep(0.5)
+                self.move_linear(pick_pose_down, vel=vel, acc=acc)
 
-            self.move_linear(pick_pose_up, vel=vel, acc=acc, avoid_collisions=False)
-            time.sleep(1.0)
+                self.rg.close_gripper(force_val=grip_force)
+                time.sleep(5.0)
 
-            gripper_status = self.rg.get_status()
-            grip_detected = bool(gripper_status[1])
+                self.move_linear(pick_pose_up, vel=vel, acc=acc, avoid_collisions=False)
+                time.sleep(1.0)
 
-            if grip_detected:
-                self.logger.info("Successfully gripped object")
-                return True
-            else:
-                print(f"{attempt_index + 1} try, Failed to grip object")
+                gripper_status = self.rg.get_status()
+                grip_detected = bool(gripper_status[1])
 
-            self.logger.warning(
-                f"Grasp check failed ({attempt_index + 1}/5)"
-            )
+                if grip_detected:
+                    self.logger.info("Successfully gripped object")
+                    return True
+                else:
+                    print(f"{attempt_index + 1} try, Failed to grip object")
 
-        self.logger.error("Failed to grip object in all 5 attempts")
-        return False
+                self.logger.warning(
+                    f"Grasp check failed ({attempt_index + 1}/5)"
+                )
+
+            self.logger.error("Failed to grip object in all 5 attempts")
+            return False
+        finally:
+            # 성공하든 실패하든 이 물체 자리를 영영 옥토맵에서 빼놓지 않는다 —
+            # 실패하면 남아있는 물체를 다시 장애물로 취급해야 안전하다.
+            self.clear_octomap_exclusion()
 
     def place_component(self, component_name, slot_name, approach_height=350):
         if slot_name not in self.place_slots:
@@ -1205,6 +1331,14 @@ class Motion:
         # PLACE 목표 위치보다 Z 방향으로 approach_height만큼 높은 안전 위치.
         place_pose_up = place_pose_down.copy()
         place_pose_up[2] += approach_height
+
+        # pick_component() 가 방금 clear_octomap() 으로 맵 전체를 비웠다
+        # (물체를 파내려면 부분 삭제가 아니라 전체 클리어밖에 방법이 없다).
+        # 여기서 트레이(inspection_pose)를 다시 보고 정착해야, 이미 놓인
+        # 다른 물체나 트레이 벽을 다시 장애물로 인식한 채로 슬롯에 들어간다.
+        if self.octomap_enabled:
+            self.move_to_inspection_pose()
+            time.sleep(self.octomap_rescan_settle_sec)
 
         # ---------------------------------------------------------
         # PLACE 좌표 확인
