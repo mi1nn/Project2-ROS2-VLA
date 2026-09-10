@@ -1,25 +1,38 @@
 #!/usr/bin/env bash
-# Ubuntu 24.04: docs/07 Controller E2E in one 3x3 Terminator window.
+# Ubuntu 24.04: docs/07 Controller E2E as a 3x3 tmux grid inside one Terminator window.
+#
+# terminator's own saved-[layouts] loader (-g/-l) is unreliable on 2.1.3
+# (upstream: "Layouts menu not working" gnome-terminator/terminator#718,
+# "layout add/save does nothing" #881 -- confirmed against this repo's
+# terminator too: -l fell back to a single default window instead of the
+# 9-pane layout). tmux's split/tiled-layout is scripted instead; terminator
+# just opens one window that attaches to it.
 set -Eeuo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ROS_SETUP=/opt/ros/jazzy/setup.bash
 WORKSPACE_SETUP="$PROJECT_DIR/install/setup.bash"
+SESSION=e2e
 
-for required in terminator docker uuidgen; do
+for required in terminator tmux docker; do
   command -v "$required" >/dev/null || { echo "Missing: $required" >&2; exit 1; }
 done
 [[ -f "$PROJECT_DIR/.env" ]] || { echo "Missing $PROJECT_DIR/.env" >&2; exit 1; }
 [[ -f "$ROS_SETUP" && -f "$WORKSPACE_SETUP" ]] || {
   echo "Build first: colcon build --symlink-install" >&2; exit 1;
 }
+tmux has-session -t "$SESSION" 2>/dev/null && {
+  echo "tmux session '$SESSION' already running -- 'tmux kill-session -t $SESSION' first." >&2
+  exit 1
+}
 
-wrap_command() {
-  local title="$1" command="$2" pane_script
-  printf -v pane_script 'cd %q; source %q; source %q; export ROS_DOMAIN_ID=%q; export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp; printf "\\033]0;%s\\007" %q; %s; status=$?; printf "\\n===== %s exited (%%s); shell kept open =====\\n" "$status"; exec %q -l' \
-    "$PROJECT_DIR" "$ROS_SETUP" "$WORKSPACE_SETUP" "${ROS_DOMAIN_ID:-20}" \
-    "$title" "$title" "$command" "$title" "${SHELL:-/bin/bash}"
-  printf 'bash -lc %q' "$pane_script"
+pane_command() {
+  local command="$1"
+  # No shell-quoting needed: tmux send-keys types this into the pane's own
+  # interactive shell, same as if a person typed it. The shell prompt
+  # returning after $command exits IS "kept open" -- no exec/trap tricks.
+  printf 'cd %q && source %q && source %q && export ROS_DOMAIN_ID=%q && export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp && %s' \
+    "$PROJECT_DIR" "$ROS_SETUP" "$WORKSPACE_SETUP" "${ROS_DOMAIN_ID:-20}" "$command"
 }
 
 # This pane starts vision only after its RealSense PointCloud2 topic exists.
@@ -38,76 +51,23 @@ CMDS=(
   'ros2 run kit_robot controller --ros-args --params-file src/kit_robot/resource/controller.yaml -p restart_delay_sec:=60.0'
 )
 
-LAYOUT_CONF="$(mktemp /tmp/e2e-terminator-XXXXXX.conf)"
-terminal_entry() {
-  local key="$1" parent="$2" order="$3" title="$4" command="$5"
-  printf '    [[[%s]]]\n      type = Terminal\n      parent = %s\n      profile = default\n      uuid = %s\n      order = %s\n      command = """%s"""\n' \
-    "$key" "$parent" "$(uuidgen)" "$order" "$(wrap_command "$title" "$command")"
-}
-
-{
-  cat <<'EOF'
-[layouts]
-  [[e2e]]
-    [[[window0]]]
-      type = Window
-      parent = ""
-      order = 0
-      maximised = True
-    [[[top_bottom]]]
-      type = VPaned
-      parent = window0
-      order = 0
-      position = 300
-    [[[top_row]]]
-      type = HPaned
-      parent = top_bottom
-      order = 0
-      position = 533
-    [[[top_right]]]
-      type = HPaned
-      parent = top_row
-      order = 1
-      position = 533
-    [[[middle_row]]]
-      type = VPaned
-      parent = top_bottom
-      order = 1
-      position = 300
-    [[[middle_content]]]
-      type = HPaned
-      parent = middle_row
-      order = 0
-      position = 533
-    [[[middle_right]]]
-      type = HPaned
-      parent = middle_content
-      order = 1
-      position = 533
-    [[[bottom_row]]]
-      type = HPaned
-      parent = middle_row
-      order = 1
-      position = 533
-    [[[bottom_right]]]
-      type = HPaned
-      parent = bottom_row
-      order = 1
-      position = 533
-EOF
-  terminal_entry terminal1 top_row 0 "${TITLES[0]}" "${CMDS[0]}"
-  terminal_entry terminal2 top_right 0 "${TITLES[1]}" "${CMDS[1]}"
-  terminal_entry terminal3 top_right 1 "${TITLES[2]}" "${CMDS[2]}"
-  terminal_entry terminal4 middle_content 0 "${TITLES[3]}" "${CMDS[3]}"
-  terminal_entry terminal5 middle_right 0 "${TITLES[4]}" "${CMDS[4]}"
-  terminal_entry terminal6 middle_right 1 "${TITLES[5]}" "${CMDS[5]}"
-  terminal_entry terminal7 bottom_row 0 "${TITLES[6]}" "${CMDS[6]}"
-  terminal_entry terminal8 bottom_right 0 "${TITLES[7]}" "${CMDS[7]}"
-  terminal_entry terminal9 bottom_right 1 "${TITLES[8]}" "${CMDS[8]}"
-} > "$LAYOUT_CONF"
-
 cd "$PROJECT_DIR"
 docker compose up -d postgres mongodb
 docker compose ps postgres mongodb
-terminator -g "$LAYOUT_CONF" -l e2e &
-echo "Started PostgreSQL/MongoDB and opened 9 Terminator panes."
+
+tmux new-session -d -s "$SESSION" -c "$PROJECT_DIR"
+for _ in 1 2 3 4 5 6 7 8; do
+  tmux split-window -t "$SESSION:0" -c "$PROJECT_DIR"
+  tmux select-layout -t "$SESSION:0" tiled >/dev/null
+done
+tmux set-option -t "$SESSION" pane-border-status top
+sleep 1  # newly split panes' shells need a moment before they'll accept send-keys
+for i in "${!CMDS[@]}"; do
+  tmux select-pane -t "$SESSION:0.$i" -T "${TITLES[$i]}"
+  tmux send-keys -t "$SESSION:0.$i" "$(pane_command "${CMDS[$i]}")" C-m
+done
+
+terminator -x tmux attach -t "$SESSION" &
+
+echo "Started PostgreSQL/MongoDB and opened a 9-pane tmux grid ('$SESSION') in Terminator."
+echo "Reattach any time with: tmux attach -t $SESSION"
