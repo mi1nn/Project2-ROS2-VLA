@@ -150,7 +150,9 @@ ros2 run kit_voice get_command
 Controller 실행 전에 결과 토픽을 구독한다.
 
 ```bash
-ros2 topic echo /kit/command_result
+ros2 run kit_robot controller --ros-args \
+--params-file src/kit_robot/resource/controller.yaml \
+-p restart_delay_sec:=10.0
 ```
 
 ```bash
