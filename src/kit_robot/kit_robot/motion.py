@@ -1636,6 +1636,26 @@ class Motion:
             )
         return 0
 
+    def _move_pose_stepped(self, target_pose, step_mm=50.0):
+        """OMPL(move_pose)로 target_pose까지 여러 홉에 걸쳐 이동한다.
+
+        move_pose 한 번으로 트레이 상공-바닥처럼 먼 거리를 뛰면 narrow
+        passage(좁은 통로) 샘플링 실패로 PLANNING_FAILED가 잦다. move_linear
+        (GetCartesianPath)는 fraction >= cartesian_min_fraction을 못 채우면
+        그냥 실패해서 이 경로엔 안 맞는다. 대신 짧은 구간으로 쪼개 각 홉을
+        OMPL이 풀기 쉬운 문제로 만든다 — 거의 직선이라 한 홉씩은 잘 풀린다.
+        """
+        current_pose = self.get_current_pose()
+        distance_mm = math.dist(current_pose[:3], target_pose[:3])
+        steps = max(1, math.ceil(distance_mm / step_mm))
+
+        for i in range(1, steps + 1):
+            waypoint = [
+                current_pose[j] + (target_pose[j] - current_pose[j]) * i / steps
+                for j in range(6)
+            ]
+            self.move_pose(waypoint)
+
     # ------------------------------------------------------------------
     # High-level pick/place API kept identical to old Motion
     # ------------------------------------------------------------------
@@ -1781,14 +1801,18 @@ class Motion:
         time.sleep(0.5)
 
         # ---------------------------------------------------------
-        # 2. 최종 PLACE 위치로 이동
-        #    기존 move_linear() 대신 move_pose() 사용.
+        # 2. PLACE 위치까지 하강
+        #    move_linear(GetCartesianPath)는 fraction 기준을 못 채우면
+        #    "움직일 수 없는 경로"로 바로 실패해서 여기선 안 쓴다.
+        #    move_pose 한 번의 큰 점프도 narrow passage 샘플링 실패
+        #    (PLANNING_FAILED)가 잦아서, _move_pose_stepped로 짧게
+        #    쪼개 내려간다.
         # ---------------------------------------------------------
         self.logger.info(
-            f"[PLACE] move_pose -> place_pose_down: {place_pose_down}"
+            f"[PLACE] move_pose(stepped) -> place_pose_down: {place_pose_down}"
         )
 
-        self.move_pose(place_pose_down)
+        self._move_pose_stepped(place_pose_down)
 
         current_pose = self.get_current_pose()
         self.logger.info(
@@ -1803,14 +1827,13 @@ class Motion:
         time.sleep(2.0)
 
         # ---------------------------------------------------------
-        # 4. 다시 PLACE 상공 안전 위치로 이동
-        #    기존 move_linear() 대신 move_pose() 사용.
+        # 4. 다시 상공으로 상승 (하강과 동일하게 stepped move_pose)
         # ---------------------------------------------------------
         self.logger.info(
-            f"[PLACE] retreat move_pose -> place_pose_up: {place_pose_up}"
+            f"[PLACE] retreat move_pose(stepped) -> place_pose_up: {place_pose_up}"
         )
 
-        self.move_pose(place_pose_up)
+        self._move_pose_stepped(place_pose_up)
 
         current_pose = self.get_current_pose()
         self.logger.info(
