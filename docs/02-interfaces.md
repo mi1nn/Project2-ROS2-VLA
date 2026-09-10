@@ -98,7 +98,7 @@ float64[] depth_position
 
 ```
 # 검출된 물체 하나. 좌표계는 카메라 기준, 단위 mm.
-string     class_name      # class_names.json 의 이름. 예: "cup_ramen"
+string     class_name      # class_names.json 의 이름. 예: "컵라면"
 float32    score           # 0.0 ~ 1.0
 float64[3] camera_xyz      # 카메라 좌표계 (x, y, z), mm
 float64[]  masking_map     # polygon 마스킹맵
@@ -157,15 +157,15 @@ string         error_code       # 아래 표 참조
 
 | 경로 | 판정 |
 | --- | --- |
-| position_estimation 이 `get_current_posx()` 호출 | **불가.** `DSR_ROBOT2` 를 import 하면 `DR_init.__dsr__node` 전역 싱글턴을 controller 와 다투게 된다 |
-| TF2 로 `base ← camera` lookup | 정석이지만, 두산 드라이버가 해당 TF 를 발행하는지 확인이 필요하다 |
-| **controller 가 request 에 담아 전달** | **채택.** controller 는 이미 posx 를 안다 |
+| position_estimation 이 로봇 API를 직접 호출 | 노드 간 결합이 생기므로 사용하지 않는다 |
+| position_estimation 이 TF2를 직접 조회 | 가능하지만 좌표 서비스가 로봇 TF 런타임에 직접 의존한다 |
+| **Controller가 request에 담아 전달** | **현재 구현.** `Motion.get_current_pose()`가 TF로 자세를 얻어 Controller에 반환한다 |
 
-**근거:** `reference/` 전체에서 로봇 자세를 얻는 코드는 예외 없이 `get_current_posx()` API 호출이다 (`robot_control.py`, `rokey_cobot2/basic/get_current_pos.py`, `jog_complete.py`). posx 를 담은 상태 토픽이나 TF 를 쓰는 예가 하나도 없다. 즉 **토픽/TF 가 있다는 근거가 없다.** 10일 일정에서 확인되지 않은 전제 위에 크리티컬 패스를 올리지 않는다.
+현재 Motion은 `base_frame → eef_link` TF를 조회하고 Doosan 호환 `[x_mm, y_mm, z_mm, A_deg, B_deg, C_deg]`로 바꿔 반환한다. Controller는 좌표 서비스 호출 직전에 이 값을 읽어 `robot_posx`에 넣는다.
 
-request 로 넘기면 `position_estimation` 은 로봇 API 를 전혀 import 하지 않는 **순수 계산 노드**가 된다. DR_init 충돌이 원천적으로 없고, 로봇 없이 단위 검증이 가능하다.
+request로 넘기면 `position_estimation`은 로봇 이동 API와 TF를 직접 다루지 않는 **순수 계산 노드**가 된다. 고정 request로 변환 로직만 단위 시험할 수 있다는 장점도 유지된다.
 
-> Day 1 에 `ros2 topic list | grep dsr` 로 상태 토픽 존재를 확인한다. 있으면 position_estimation 이 구독하고 `robot_posx` 는 오버라이드용으로 남는다. **어느 쪽이든 계약은 그대로**라 팀 재빌드가 발생하지 않는다.
+> 정확한 변환을 위해서는 검출 프레임과 `robot_posx`가 같은 관찰 자세에서 얻어져야 한다. Controller는 관찰 자세 이동 후 정착 시간을 둔 다음 현재 자세를 읽고 좌표 서비스를 호출한다.
 
 ### 2.6 최신성 가드 — 생략 불가
 
@@ -179,7 +179,7 @@ eye-in-hand 구성에서 가장 위험한 실패다. position_estimation 이 들
 
 Controller는 error_code=stale로 좌표 검출 노후를 처리한다. 검사 서비스의 detection_age만 검사 JSON에 기록한다.
 
-**Controller 초기 정책:** max_age_sec=1.0, 관찰·검사 정착 대기 1.2초를 사용한다.
+**Controller 코드 기본값:** `max_age_sec=1.0`, 관찰·검사 정착 대기 `1.2초`다. 현재 제공되는 `controller.yaml`은 실기 설정으로 각각 `3.0초`, `4.0초`를 덮어쓴다.
 정착 시작은 자세 이동 완료 시점이며 응답을 받을 때까지 해당 자세를 유지한다.
 검출 stamp와 서버 시각이 동일 시간 기준이고 이동 완료 시점을 정확히 안다는 전제다.
 호스트 간 시계 오차도 0.2초 여유 이내여야 한다. 미래 stamp·시계 불일치 방어가 완료되었다고
@@ -221,11 +221,17 @@ expected_classes와 expected_counts는 원래 검증된 명령에서 동일 순�
 
 현재 inspect_counts는 전체 검출을 세며 트레이 ROI 필터는 없다. 초기 운영에서는 검사 화면에 완성 트레이의 검사 대상 물체만 포함되도록 배치한다. 원본 물체가 함께 보이면 검사 성공 판정에 사용하기 전에 촬영 구성을 조정한다. ROI 필터 추가는 이번 범위 밖이다.
 
+### 2.8 GraspGenX 경로의 인터페이스 경계
+
+FoundationPose + GraspGenX 파지는 현재 `GetComponentPose`를 사용하지 않는다. `grasp_pick_test.py`가 외부 파일의 `grasp_poses`, `scores`, 완성 객체 포인트클라우드를 읽어 Motion에 직접 전달한다.
+
+따라서 이 경로는 `kit_interfaces` 계약을 변경하지 않은 독립 시험 경로다. GraspGenX 후보를 Controller 상태머신에 연결하거나 토픽·서비스로 전달하는 계약은 아직 구현되어 있지 않다.
+
 ---
 
 ## 3. 음성 ↔ 로봇
 
-### 3.1 `srv/GetCommand.srv` → `command_node` 가 서버
+### 3.1 `srv/GetCommand.srv` → `get_command` (`get_command_node`)가 서버
 
 ```
 string task_id   # 작업 1회 식별자. controller 가 생성해 요청에 담는다.
@@ -240,7 +246,7 @@ string error_code
 **`task_id`.** MongoDB `commands`/`kit_executions`/`component_executions` 세 컬렉션을 하나의
 작업으로 묶는 키다([05 데이터베이스](05-database.md) ID 체계). `controller` 가
 `IDLE → LISTEN` 진입 시(이 서비스를 호출하는 유일한 지점) 생성해서 요청에 실어 보낸다.
-`command_node` 는 응답과 `/kit/command_result`에 이 값을 그대로 사용하므로, 이후 DB 기록
+`get_command_node`는 응답과 `/kit/command_result`에 이 값을 그대로 사용하므로, 이후 DB 기록
 단계에서 재발급하지 않고 요청 시점의 값을 계속 쓴다. `command_json` 내부에는 실행 명령인
 `kit_type`과 `items`만 넣고, `task_id`와 `raw_text`는 `CommandResult`의 별도 필드로 전달한다.
 
@@ -253,10 +259,11 @@ string error_code
 
 ```json
 {
-  "kit_type": "earthquake",
+  "kit_type": "키트1번",
   "items": [
-    {"name": "cup_ramen", "qty": 2},
-    {"name": "mask",      "qty": 1}
+    {"name": "컵라면", "qty": 1},
+    {"name": "샴푸리필", "qty": 1},
+    {"name": "양갱", "qty": 1}
   ]
 }
 ```
@@ -301,7 +308,7 @@ DB 노드는 아래 세 토픽을 구독한다. MongoDB 필드 매핑, 검증 �
 
 ### 4.1 `msg/CommandResult.msg` (음성 → DB)
 
-아래는 목표 발행 계약이다. 현재 get_keyword.py의 서비스 응답은 구현되어 있으나 CommandResult publisher 연결은 후속 작업이다. Controller의 결과 토픽 두 개는 발행 구현이 되어 있다.
+`get_keyword.py`는 아래 형식의 `CommandResult` publisher를 구현해 `/kit/command_result`로 발행한다. Controller의 결과 토픽 두 개도 발행 구현이 되어 있다.
 
 ```
 string task_id
@@ -316,6 +323,8 @@ builtin_interfaces/Time stamp
 
 토픽은 `/kit/command_result`다. 명령 해석과 검증이 끝날 때 성공·실패 모두 발행한다.
 성공 시 `command_json`은 비어 있지 않은 JSON 객체여야 한다.
+
+현재 성공, `wakeword_timeout`, 일반 STT 예외는 발행한다. 오디오 스트림 열기 실패, `RateLimitError`, `invalid_command`, 기타 LLM 예외는 서비스 실패 응답만 반환하고 토픽을 발행하지 않는 분기가 남아 있으므로, **모든 실패가 DB에 기록된다고 가정하면 안 된다.** 서비스 응답의 `command_json`에는 과도기적으로 `raw_text`와 `task_id`도 들어가지만, 발행 메시지의 `command_json`은 `kit_type`과 `items`만 남긴다.
 
 ### 4.2 `msg/TaskStatus.msg` (로봇 → DB/UI)
 
@@ -391,7 +400,7 @@ ros2 topic hz   /detection/objects
 
 # 좌표 서비스 왕복 시험 (Day 2)
 ros2 service call /get_component_pose kit_interfaces/srv/GetComponentPose \
-  "{component: 'cup_ramen', robot_posx: [400,0,400,0,180,0], max_age_sec: 1.0}"
+  "{component: '컵라면', robot_posx: [400,0,400,0,180,0], max_age_sec: 1.0}"
 ros2 service call /get_command kit_interfaces/srv/GetCommand "{task_id: 'TASK-20260905T053012123456Z'}"
 
 # 상태 발행 확인
@@ -399,8 +408,8 @@ ros2 topic echo /kit/task_status
 ros2 topic echo /kit/command_result
 ros2 topic echo /kit/component_result
 
-# Day 1 확인 항목: 로봇 상태 토픽이 실제로 있는지 (2.5절)
-ros2 topic list | grep dsr
+# Motion이 사용하는 TF가 연결되는지 확인
+ros2 run tf2_ros tf2_echo base_link link_6
 ```
 
 Day 2 에 `object_detection` 이 고정 `DetectionArray` 를 발행하는 mock 부터 만드는 이유가 이것이다. YOLO 모델이 나오기 전에 계약과 `position_estimation` 결선을 먼저 끝내둔다.
