@@ -164,8 +164,14 @@ class Motion:
         self.cup_grasp_max_tilt_deg = float(
             live_gg.get("max_tilt_deg", 30.0)
         )
+        # GraspGenX가 제안한 원래 접촉점보다 approach 반대방향(-grasp Z)으로
+        # 실제 실행 GRASP를 뒤로 당긴다.
+        self.cup_grasp_offset_mm = float(
+            live_gg.get("grasp_offset_mm", 20.0)
+        )
+        # 위에서 보정된 실제 GRASP보다 다시 이 거리만큼 뒤가 PREGRASP다.
         self.cup_grasp_pregrasp_distance_mm = float(
-            live_gg.get("pregrasp_distance_mm", 50.0)
+            live_gg.get("pregrasp_distance_mm", 40.0)
         )
         self.cup_grasp_linear_vel_mm_s = float(
             live_gg.get("linear_vel_mm_s", 50.0)
@@ -185,6 +191,10 @@ class Motion:
         if not 0.0 < self.cup_grasp_max_tilt_deg <= 90.0:
             raise ValueError(
                 "graspgenx_live.max_tilt_deg must be in (0, 90]"
+            )
+        if self.cup_grasp_offset_mm < 0.0:
+            raise ValueError(
+                "graspgenx_live.grasp_offset_mm must be >= 0"
             )
         if self.cup_grasp_pregrasp_distance_mm <= 0.0:
             raise ValueError(
@@ -2094,12 +2104,31 @@ class Motion:
             self.eef_link,
         )
 
-        T_base_grasp = (
+        # Raw GraspGenX pose is intentionally NOT executed directly.
+        # GraspGenX local +Z is the approach direction, so -Z moves outward
+        # (away from the object).  The executed grasp is pulled back first.
+        grasp_offset_m = (
+            self.cup_grasp_offset_mm
+            / 1000.0
+        )
+        pregrasp_distance_m = (
+            self.cup_grasp_pregrasp_distance_mm
+            / 1000.0
+        )
+
+        T_camera_grasp_exec = (
+            T_camera_grasp
+            @ self._translation_matrix_m(
+                z=-grasp_offset_m
+            )
+        )
+
+        T_base_grasp_exec = (
             T_base_camera
-            @ T_camera_grasp
+            @ T_camera_grasp_exec
         )
         T_base_tool0 = (
-            T_base_grasp
+            T_base_grasp_exec
             @ self.cup_grasp_T_grasp_tool0
         )
         T_base_eef = (
@@ -2107,14 +2136,11 @@ class Motion:
             @ T_tool0_eef
         )
 
-        distance_m = (
-            self.cup_grasp_pregrasp_distance_mm
-            / 1000.0
-        )
+        # PREGRASP is another outward offset from the corrected EXECUTED GRASP.
         T_camera_pregrasp = (
-            T_camera_grasp
+            T_camera_grasp_exec
             @ self._translation_matrix_m(
-                z=-distance_m
+                z=-pregrasp_distance_m
             )
         )
         T_base_tool0_pre = (
@@ -2128,7 +2154,8 @@ class Motion:
         )
 
         return {
-            "T_camera_grasp": T_camera_grasp,
+            "T_camera_grasp_raw": T_camera_grasp,
+            "T_camera_grasp": T_camera_grasp_exec,
             "T_base_tool0": T_base_tool0,
             "T_base_tool0_pre": T_base_tool0_pre,
             "grasp_pose6": self._matrix_m_to_pose6(
@@ -2638,6 +2665,8 @@ class Motion:
                     f"[CUP CANDIDATE {rank}/{len(top_indices)}] "
                     f"index={index}, score={score:.4f}, "
                     f"tilt={tilt:.2f}deg, "
+                    f"grasp_offset={self.cup_grasp_offset_mm:.1f}mm, "
+                    f"pregrasp_extra={self.cup_grasp_pregrasp_distance_mm:.1f}mm, "
                     "approach_base=("
                     f"{approach[0]:+.3f}, "
                     f"{approach[1]:+.3f}, "
