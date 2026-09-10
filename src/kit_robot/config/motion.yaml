@@ -1,10 +1,4 @@
 motion:
-  # [ MoveIt2 interface settings ]
-  # Standard Doosan M0609 SRDF uses group=manipulator, base_link -> tool0.
-  # If m0609_rg2_moveit_config defines an RG2 TCP as the planning tip, change
-  # eef_link to that exact frame. This frame must also match the frame used by
-  # T_gripper2camera.npy hand-eye calibration.
-
   moveit:
     planning_group: "manipulator"
     base_frame: "base_link"
@@ -24,24 +18,36 @@ motion:
     apply_planning_scene_service: "/dsr01/apply_planning_scene"
 
     default_keepout_box:
-      enable: true
+      enabled: true
       id: "base_keepout_box"
       min_cm: [-200.0, 40.0, -100.0]
       max_cm: [200.0, 100.0, 600.0]
       marker_topic: "/kit_robot/default_keepout_box_marker"
 
+    octomap:
+      enabled: true
+      cloud_in: "/camera/depth/color/points"
+      cloud_out: "/kit/octomap_cloud"
+      clear_service: "/dsr01/clear_octomap"
+      get_planning_scene_service: "/dsr01/get_planning_scene"
+      static_scan_sec: 3.0
+      static_voxel_size_m: 0.01
+      static_min_depth_m: 0.28
+      static_neighbor_min_count: 4
+      allowed_collision_links:
+        - "link_6"
+        - "tool0"
+        - "rg2_base_link"
+
     server_ready_timeout_sec: 15.0
     motion_timeout_sec: 60.0
     tf_timeout_sec: 2.0
-
     planning_time_sec: 5.0
     planning_attempts: 5
     pipeline_id: ""
     planner_id: ""
 
     joint_tolerance_deg: 0.5
-
-    # DSR movej used absolute deg/s and deg/s^2
     default_joint_velocity_scale: 0.15
     default_joint_acceleration_scale: 0.15
 
@@ -52,26 +58,21 @@ motion:
     cartesian_revolute_jump_threshold: 0.0
     cartesian_acc_reference_mm_s2: 1000.0
 
-
   positions:
     home:
       type: "joint"
       pos: [0.0, 0.0, 90.0, 0.0, 90.0, 0.0]
-      joint_vel: 30.0
-      joint_acc: 60.0
       joint_velocity_scale: 0.15
       joint_acceleration_scale: 0.15
 
     observation_pose:
       type: "joint"
       pos: [0.0, 0.0, 60.0, 0.0, 120.0, 0.0]
-      joint_vel: 30.0
-      joint_acc: 60.0
       joint_velocity_scale: 0.15
       joint_acceleration_scale: 0.15
 
     inspection_pose:
-      type: "cartesian"
+      type: "pose"
       pos: [-382.990, 45.070, 398.620, 171.30, 177.59, 78.66]
       joint_velocity_scale: 0.15
       joint_acceleration_scale: 0.15
@@ -85,50 +86,47 @@ motion:
     slots:
       slot_1:
         pos: [-397.42, 138.87, 230.0, 41.74, 179.48, -136.13]
-
       slot_2:
         pos: [-397.42, 3.44, 230.0, 39.02, 179.37, -138.95]
-
       slot_3:
         pos: [-397.42, -132.0, 230.0, 36.29, 179.26, -141.78]
-
       slot_4:
         pos: [-513.55, 138.87, 230.0, 39.02, 179.37, -138.95]
-
       slot_5:
         pos: [-513.55, 3.44, 230.0, 36.29, 179.26, -141.78]
-
       slot_6:
         pos: [-513.55, -132.0, 230.0, 33.57, 179.15, -144.6]
 
+  graspgenx_live:
+    component_name: "컵라면"
+    service: "/cup_pick/perception"
+    snapshot: "/tmp/graspgenx_live/latest.npz"
+    camera_frame: "camera_color_optical_frame"
+    tool_frame: "tool0"
 
-  graspgenx:
-      execution_enabled: true
+    top_k: 5
+    max_tilt_deg: 30.0
+    grasp_offset_mm: 20.0
+    pregrasp_distance_mm: 40.0
+    linear_vel_mm_s: 50.0
+    linear_acc_mm_s2: 100.0
+    perception_timeout_sec: 180.0
+    snapshot_timeout_sec: 3.0
 
-      candidate_file: "/home/rokey/FoundationPose/grasp_bridge/00/obj_0_table_safe_grasps.npz"
-      complete_object_pc: "/home/rokey/FoundationPose/grasp_bridge/00/complete_object_pc.npy"
-
-      tool_frame: "tool0"
-
-      pregrasp_mode: "grasp_z"
-      pregrasp_distance_mm: 100.0
-      max_candidates: 10
-  
-      object_exclusion_margin_mm: 25.0
-      min_exclusion_radius_mm: 35.0
-      max_exclusion_radius_mm: 180.0
-
-      camera_extrinsics:
-        source: "tf"
-        camera_frame: "camera_color_optical_frame"
-        validated: true
-
-      grasp_to_tool:
-        assume_same_frame: true
-        validated: true
-        matrix: [
-           0.0,  0.0, -1.0,  0.000,
-           0.0,  1.0,  0.0,  0.000,
-           1.0,  0.0,  0.0, -0.000,
-           0.0,  0.0,  0.0,  1.000
-        ]
+    grasp_to_tool_matrix:
+      - 0.0
+      - 0.0
+      - -1.0
+      - 0.0
+      - 0.0
+      - 1.0
+      - 0.0
+      - 0.0
+      - 1.0
+      - 0.0
+      - 0.0
+      - -0.004
+      - 0.0
+      - 0.0
+      - 0.0
+      - 1.0
