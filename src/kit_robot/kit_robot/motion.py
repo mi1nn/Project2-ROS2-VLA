@@ -1021,6 +1021,16 @@ class Motion:
         self.logger.info("Octomap cleared")
         return True
 
+    def prepare_octomap_for_new_task(self):
+        """Clear an old task's map before waiting for its next command."""
+        if not self.octomap_enabled:
+            return True
+
+        # Stop the relay first: wakeword/STT can keep the command pending.
+        self._octomap_frozen = False
+        self.set_octomap_mapping(False)
+        return self.clear_octomap()
+
     def _allow_octomap_collisions(self):
         """Excuse the gripper links from octomap collisions, once, at startup.
 

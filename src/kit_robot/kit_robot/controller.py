@@ -321,6 +321,8 @@ class Controller(Node):
 
         try:
             # 요청을 비동기로 전송
+            if not self.motion.prepare_octomap_for_new_task():
+                raise RuntimeError("ClearOctomap failed")
             self.pending_future = self.command_client.call_async(
                 request
             )

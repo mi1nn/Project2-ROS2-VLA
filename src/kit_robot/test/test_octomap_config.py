@@ -5,6 +5,7 @@ RViz 에 voxel 만 안 보임). 로봇을 띄우기 전에 잡는다.
 
 실행: python3 -m pytest src/kit_robot/test/test_octomap_config.py
 """
+import ast
 import time
 from pathlib import Path
 
@@ -359,3 +360,34 @@ def test_frozen_octomap_refuses_reopen_and_clear():
     assert motion.Motion.set_octomap_mapping(fake, True) is False
     assert fake._octomap_mapping is False, "확정 지도에 새 프레임이 들어갔다"
     assert motion.Motion.clear_octomap(fake) is False, "확정 지도가 지워졌다"
+
+
+def test_prepare_octomap_for_new_task_closes_gate_and_clears():
+    source_path = _workspace_root() / "src/kit_robot/kit_robot/motion.py"
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    method = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "prepare_octomap_for_new_task"
+    )
+    namespace = {}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), str(source_path), "exec"), namespace)
+
+    class Fake:
+        octomap_enabled = True
+        _octomap_frozen = True
+
+        def __init__(self):
+            self.calls = []
+
+        def set_octomap_mapping(self, enabled):
+            self.calls.append(("mapping", enabled))
+
+        def clear_octomap(self):
+            self.calls.append(("clear",))
+            return True
+
+    fake = Fake()
+    assert namespace["prepare_octomap_for_new_task"](fake) is True
+    assert fake._octomap_frozen is False
+    assert fake.calls == [("mapping", False), ("clear",)]

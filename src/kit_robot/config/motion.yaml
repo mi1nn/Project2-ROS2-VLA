@@ -49,7 +49,7 @@ motion:
       # voxel_size 를 키우면(느슨해지면) 더 많이 살아남고, min_neighbors 를
       # 키우면 더 빡빡하게 걸러진다.
       denoise_voxel_size_m: 0.01
-      denoise_min_neighbors: 4
+      denoise_min_neighbors: 6
 
       # 그레이징 앵글(눕혀서 보는 각도)에서는 depth 가 계단처럼 찍힌다 —
       # 한 계단 안은 점들이 서로 다 동의(밀집)하므로 위 디노이즈로는 안
