@@ -1,5 +1,10 @@
 # Controller.py
 # 상태 전이·서비스 요청·결과 발행을 담당하며 실제 로봇 API는 Motion에 위임한다.
+import os
+import sys
+
+from ament_index_python.packages import get_package_share_directory
+
 import json
 import math
 import time
@@ -330,7 +335,7 @@ class Controller(Node):
 
         try:
             # 요청을 비동기로 전송
-            if not self.motion.prepare_octomap_for_new_task():
+            if not self.motion.move_to_inspection_pose(clear_before=True):
                 raise RuntimeError("ClearOctomap failed")
             self.pending_future = self.command_client.call_async(
                 request
@@ -1311,26 +1316,57 @@ class Controller(Node):
 
 
 def main(args=None):
-    '''Motion를 주입한 Controller를 실행하고 종료 시 ROS 자원을 정리한다.'''
-    rclpy.init(args=args)
-    # node = Controller(motion=MotionDemo())
+    """기본 controller.yaml을 자동 적용하여 Controller를 실행한다."""
+
+    ros_args = list(sys.argv[1:] if args is None else args)
+
+    # 사용자가 직접 --params-file을 지정하지 않은 경우
+    # kit_robot/resource/controller.yaml을 자동으로 사용한다.
+    if "--params-file" not in ros_args:
+        config_path = os.path.join(
+            get_package_share_directory("kit_robot"),
+            "resource",
+            "controller.yaml",
+        )
+
+        if not os.path.isfile(config_path):
+            raise FileNotFoundError(
+                f"Controller parameter file not found: {config_path}"
+            )
+
+        ros_args.extend([
+            "--ros-args",
+            "--params-file",
+            config_path,
+        ])
+
+        print(
+            f"[Controller] Auto-loading parameters: {config_path}"
+        )
+
+    rclpy.init(args=ros_args)
+
     node = Controller()
     node.motion = Motion(node)
 
     try:
-        # rclpy.spin(node)
         while rclpy.ok():
-            rclpy.spin_once(node, timeout_sec = 0.1)
+            rclpy.spin_once(node, timeout_sec=0.1)
             node.timer_tick()
+
     except KeyboardInterrupt:
         pass
+
     finally:
-        # Motion owns a private MoveIt executor/node. Stop it before shutting ROS down.
         try:
-            if node.motion is not None and hasattr(node.motion, "shutdown"):
+            if (
+                node.motion is not None
+                and hasattr(node.motion, "shutdown")
+            ):
                 node.motion.shutdown()
         finally:
             node.destroy_node()
+
             if rclpy.ok():
                 rclpy.shutdown()
 
