@@ -48,7 +48,7 @@ motion:
       # 개수로 이상치를 거른다(motion.py: _remove_outlier_points).
       # voxel_size 를 키우면(느슨해지면) 더 많이 살아남고, min_neighbors 를
       # 키우면 더 빡빡하게 걸러진다.
-      denoise_voxel_size_m: 0.01
+      denoise_voxel_size_m: 0.02
       denoise_min_neighbors: 6
 
       # 그레이징 앵글(눕혀서 보는 각도)에서는 depth 가 계단처럼 찍힌다 —
