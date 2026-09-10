@@ -120,6 +120,10 @@ class Controller(Node):
         self.declare_parameter("pose_timeout_sec", 5.0)
         self.declare_parameter("max_age_sec", 1.0)
         self.declare_parameter("observation_settle_sec", 1.2)
+        # 홈 자세에서 작업당 딱 한 번 도는 장시간 octomap 촬영 창. 이 시간이
+        # 끝나면 지도를 확정(freeze)하고 이후로는 다시 찍지 않으므로, 정착
+        # 시간보다 넉넉히 길어야 카메라가 볼 면을 다 쌓는다.
+        self.declare_parameter("home_octomap_scan_sec", 10.0)
 
         self.pose_timeout = self.get_parameter(
             "pose_timeout_sec"
@@ -130,12 +134,22 @@ class Controller(Node):
         self.observation_settle = self.get_parameter(
             "observation_settle_sec"
         ).value
+        self.home_octomap_scan = self.get_parameter(
+            "home_octomap_scan_sec"
+        ).value
 
         if self.pose_timeout <= 0 or self.max_age_sec <= 0:
             raise ValueError("좌표 timeout과 검출 허용 나이는 양수여야 합니다.")
 
         if self.observation_settle <= self.max_age_sec:
             raise ValueError("관찰 정착 시간은 검출 허용 나이보다 길어야 합니다.")
+
+        # 이 창이 끝나는 즉시 좌표를 요청하므로, 정착 시간만큼은 확보돼야
+        # 이동 전 프레임의 검출로 좌표를 잡는 사고가 안 난다.
+        if self.home_octomap_scan < self.observation_settle:
+            raise ValueError(
+                "홈 octomap 촬영 시간은 관찰 정착 시간 이상이어야 합니다."
+            )
 
         # 최초 시도를 포함한 상한: 2이면 최초 1회 + 재시도 1회다.
         self.declare_parameter("max_attempts", 2)
@@ -273,6 +287,9 @@ class Controller(Node):
         # tray 도착 직후 게이트를 열어봐야 카메라 프레임이 아직 안 들어온 상태다.
         # None이 아니면 "정착 대기 중" — 이 시각이 지나야 관찰 자세로 넘어간다.
         self.place_octomap_settle_at = None
+        # 홈 자세 장시간 촬영이 끝나는 시각. None이 아니면 "촬영 중" — 이 시각이
+        # 지나면 지도를 확정하고, 이후 어떤 구간에서도 다시 찍지 않는다.
+        self.home_octomap_scan_at = None
 
         # 현재 작업에서 발행한 index 집합. DB 저장 완료를 확인하는 장치는 아니다.
         self.published_component_indices = set()
@@ -381,16 +398,25 @@ class Controller(Node):
         )
 
 
-    def _enter_observation_pose(self):
-        '''관찰 자세로 이동하고 좌표 요청 정착 대기를 시작한다. 실패 시 REPORT로 전환.'''
+    def _enter_observation_pose(self, seed_scan: bool = False):
+        '''관찰 자세로 이동하고 좌표 요청 정착 대기를 시작한다. 실패 시 REPORT로 전환.
+
+        seed_scan=True는 작업당 한 번뿐인 홈 자세 장시간 촬영이다. 이 지도는
+        이후 모든 컴포넌트가 공유하므로 특정 컴포넌트 마스크를 빼지 않는다 —
+        빼봐야 1번 물체만 빠지고 2번 이후는 어차피 남아 일관성이 없는 데다,
+        그 물체가 10초 내내 YOLO에 안 잡히면 cloud 콜백이 전 프레임을 버려
+        빈 지도로 확정돼버린다(확정 후엔 다시 찍을 기회가 없다).
+        '''
         component = self.components[self.component_index]
         try:
             self.motion_started = True
             # octomap 게이트가 열리기 *전에* 걸어야 한다 — 부분 삭제 API가
             # 없어서, 게이트가 열리고 들어오는 첫 프레임부터 이 물체의 voxel이
-            # 박히기 시작하면 다시는 못 뺀다. 어차피 트레이 스캔 이후로는
-            # freeze_octomap()이 게이트를 잠가 두므로 실제로는 무해하다.
-            self.motion.set_octomap_exclusion_component(component.name)
+            # 박히기 시작하면 다시는 못 뺀다.
+            if seed_scan:
+                self.motion.clear_octomap_exclusion()
+            else:
+                self.motion.set_octomap_exclusion_component(component.name)
             self.motion.move_to_observation_pose()
         except Exception as error:
             self.task_fatal = True
@@ -401,6 +427,15 @@ class Controller(Node):
                 TransitionCategory.TASK_FATAL,
                 f"관찰 자세 이동 실패: {self.error_code}, {self.detail}",
             )
+            return
+
+        if seed_scan:
+            # 촬영 창이 정착 시간보다 길다(생성자에서 검증). 창이 끝날 때
+            # 지도를 확정하고 곧바로 좌표를 요청하므로 정착도 같이 끝난다.
+            self.home_octomap_scan_at = (
+                time.monotonic() + self.home_octomap_scan
+            )
+            self.pose_ready_at = self.home_octomap_scan_at
             return
 
         self.pose_ready_at = (
@@ -463,12 +498,19 @@ class Controller(Node):
                 return
             self.place_octomap_ready = True
             self.place_octomap_settle_at = None
-            # 키팅 트레이 스캔이 전부다. 여기서 잠그면 관찰·픽·플레이스·최종
-            # 검사까지 전 구간이 이 지도 하나만 보고 계획하고, 다른 자세에서는
-            # 다시 찍지 않는다.
-            self.motion.freeze_octomap()
-            self._enter_observation_pose()
+            # 두 번째이자 마지막 촬영: 홈 자세로 가서 장시간 창을 연다.
+            self._enter_observation_pose(seed_scan=True)
             return
+
+        if self.home_octomap_scan_at is not None:
+            if time.monotonic() < self.home_octomap_scan_at:
+                return
+            self.home_octomap_scan_at = None
+            # 트레이 1회 + 홈 1회로 지도가 다 찼다. 여기서 잠그면 픽·플레이스·
+            # 최종 검사까지 전 구간이 이 지도 하나만 보고 계획한다.
+            self.motion.freeze_octomap()
+            # 이 시점에 pose_ready_at도 이미 지났다(창 >= 정착) — 아래로 흘러
+            # 그대로 좌표 요청으로 이어진다.
 
         if time.monotonic() < self.pose_ready_at:
             return
