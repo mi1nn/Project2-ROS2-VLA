@@ -1,9 +1,10 @@
 motion:
-  # MoveIt2 interface settings.
+  # [ MoveIt2 interface settings ]
   # Standard Doosan M0609 SRDF uses group=manipulator, base_link -> tool0.
   # If m0609_rg2_moveit_config defines an RG2 TCP as the planning tip, change
   # eef_link to that exact frame. This frame must also match the frame used by
   # T_gripper2camera.npy hand-eye calibration.
+
   moveit:
     planning_group: "manipulator"
     base_frame: "base_link"
@@ -17,8 +18,6 @@ motion:
       - "joint_5"
       - "joint_6"
 
-    # Standard move_group capability names. If your launch namespaces move_group,
-    # change these to e.g. /dsr01/move_action, etc.
     move_group_action: "/dsr01/move_action"
     execute_trajectory_action: "/dsr01/execute_trajectory"
     cartesian_path_service: "/dsr01/compute_cartesian_path"
@@ -42,23 +41,17 @@ motion:
 
     joint_tolerance_deg: 0.5
 
-    # DSR movej used absolute deg/s and deg/s^2. MoveIt planning uses scaling
-    # factors against joint_limits.yaml, so these values are the MoveIt equivalent
-    # knobs. 0.15 is intentionally conservative for the initial real-robot test.
+    # DSR movej used absolute deg/s and deg/s^2
     default_joint_velocity_scale: 0.15
     default_joint_acceleration_scale: 0.15
 
-    # DSR movel replacement: /compute_cartesian_path -> /execute_trajectory.
     cartesian_max_step_m: 0.005
     cartesian_min_fraction: 0.999
     cartesian_jump_threshold: 0.0
     cartesian_prismatic_jump_threshold: 0.0
     cartesian_revolute_jump_threshold: 0.0
-
-    # GetCartesianPath accepts absolute max Cartesian speed, so vel=80 means
-    # 80 mm/s -> 0.08 m/s. It accepts acceleration only as a joint scaling factor;
-    # this reference maps acc=160 mm/s^2 to 0.16 for the initial tuning.
     cartesian_acc_reference_mm_s2: 1000.0
+
 
   positions:
     home:
@@ -79,8 +72,6 @@ motion:
 
     inspection_pose:
       type: "cartesian"
-      # Doosan-compatible pose: [x_mm, y_mm, z_mm, A_deg, B_deg, C_deg]
-      # Orientation uses intrinsic ZYZ Euler and is converted to quaternion in motion.py.
       pos: [-382.990, 45.070, 398.620, 171.30, 177.59, 78.66]
       joint_velocity_scale: 0.15
       joint_acceleration_scale: 0.15
@@ -110,9 +101,7 @@ motion:
       slot_6:
         pos: [-513.55, -132.0, 230.0, 33.57, 179.15, -144.6]
 
-  # ------------------------------------------------------------------
-  # FoundationPose + GraspGenX -> MoveIt execution
-  # ------------------------------------------------------------------
+
   graspgenx:
       execution_enabled: true
 
@@ -121,7 +110,6 @@ motion:
 
       tool_frame: "tool0"
 
-    # GraspGen canonical +Z 축을 기준으로 접근
       pregrasp_mode: "grasp_z"
       pregrasp_distance_mm: 100.0
       max_candidates: 10
@@ -141,6 +129,6 @@ motion:
         matrix: [
            0.0,  0.0, -1.0,  0.000,
            0.0,  1.0,  0.0,  0.000,
-           1.0,  0.0,  0.0, -0.004,
+           1.0,  0.0,  0.0, -0.000,
            0.0,  0.0,  0.0,  1.000
         ]
