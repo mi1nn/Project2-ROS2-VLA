@@ -88,6 +88,12 @@ SYNC_QUEUE_SIZE = 10
 SYNC_SLOP_SEC = 0.08
 MAX_FRAME_AGE_SEC = 1.0
 
+# A service request must use a NEW synchronized RGB-D pair captured after the
+# request arrives.  If the camera drops a frame momentarily, wait/retry locally
+# instead of failing the whole cup-pick attempt immediately.
+FRAME_CAPTURE_MAX_ATTEMPTS = 3
+FRAME_CAPTURE_WAIT_SEC = 0.7
+
 # Keep the normal ROS camera at its current resolution.
 # Only the FoundationPose request is resized.
 FOUNDATIONPOSE_MAX_WIDTH = 640
@@ -791,6 +797,7 @@ class CupPickPerceptionPipeline(Node):
 
         self.cv_bridge = CvBridge()
         self.frame_lock = threading.Lock()
+        self.frame_condition = threading.Condition(self.frame_lock)
         self.request_lock = threading.Lock()
 
         self.latest_color_bgr = None
@@ -798,6 +805,7 @@ class CupPickPerceptionPipeline(Node):
         self.latest_stamp = None
         self.latest_frame_id = None
         self.latest_receive_time = None
+        self.latest_frame_seq = 0
 
         self.camera_K = None
         self.camera_info_width = 0
@@ -917,6 +925,11 @@ class CupPickPerceptionPipeline(Node):
         self.get_logger().info(
             f"Service       : {PIPELINE_SERVICE}"
         )
+        self.get_logger().info(
+            "Frame retry   : "
+            f"{FRAME_CAPTURE_MAX_ATTEMPTS} attempts x "
+            f"{FRAME_CAPTURE_WAIT_SEC:.2f}s, fresh frame required"
+        )
 
     def publish_grasp_status(self, text):
         msg = String()
@@ -929,10 +942,13 @@ class CupPickPerceptionPipeline(Node):
             dtype=np.float64,
         ).reshape(3, 3)
 
-        with self.frame_lock:
+        with self.frame_condition:
             self.camera_K = K
             self.camera_info_width = int(msg.width)
             self.camera_info_height = int(msg.height)
+            # Wake a pending service callback in case RGB-D is already fresh and
+            # CameraInfo was the last missing piece.
+            self.frame_condition.notify_all()
 
     def rgbd_callback(self, color_msg, depth_msg):
         try:
@@ -958,7 +974,7 @@ class CupPickPerceptionPipeline(Node):
                 )
                 return
 
-            with self.frame_lock:
+            with self.frame_condition:
                 self.latest_color_bgr = (
                     np.asarray(
                         color_bgr,
@@ -973,6 +989,8 @@ class CupPickPerceptionPipeline(Node):
                     or "camera_color_optical_frame"
                 )
                 self.latest_receive_time = time.monotonic()
+                self.latest_frame_seq += 1
+                self.frame_condition.notify_all()
 
         except Exception as e:
             self.get_logger().error(
@@ -1025,6 +1043,121 @@ class CupPickPerceptionPipeline(Node):
             K,
             stamp,
             frame_id,
+        )
+
+    def wait_for_fresh_snapshot(
+        self,
+        after_frame_seq,
+        timeout_sec=FRAME_CAPTURE_WAIT_SEC,
+    ):
+        """Wait for a synchronized RGB-D pair newer than *after_frame_seq*.
+
+        ApproximateTimeSynchronizer already guarantees the RGB/depth pair is
+        within SYNC_SLOP_SEC.  The service callback additionally requires the
+        pair to arrive AFTER the service request, so a stale cached frame is
+        never sent to FoundationPose.
+        """
+        deadline = time.monotonic() + float(timeout_sec)
+
+        with self.frame_condition:
+            while rclpy.ok():
+                now = time.monotonic()
+
+                ready = (
+                    self.latest_frame_seq > int(after_frame_seq)
+                    and self.latest_color_bgr is not None
+                    and self.latest_depth_m is not None
+                    and self.camera_K is not None
+                    and self.latest_receive_time is not None
+                )
+
+                if ready:
+                    age = now - self.latest_receive_time
+                    if age <= MAX_FRAME_AGE_SEC:
+                        color = self.latest_color_bgr.copy()
+                        depth = self.latest_depth_m.copy()
+                        K = self.camera_K.copy()
+                        stamp = self.latest_stamp
+                        frame_id = self.latest_frame_id
+                        info_width = self.camera_info_width
+                        info_height = self.camera_info_height
+                        frame_seq = int(self.latest_frame_seq)
+                        break
+
+                remaining = deadline - now
+                if remaining <= 0.0:
+                    raise TimeoutError(
+                        "No fresh synchronized RGB-D frame arrived "
+                        f"within {float(timeout_sec):.2f}s "
+                        f"(last_seq={self.latest_frame_seq}, "
+                        f"required_seq>{int(after_frame_seq)})."
+                    )
+
+                self.frame_condition.wait(timeout=remaining)
+            else:
+                raise RuntimeError("ROS shutdown while waiting for camera frame.")
+
+        h, w = color.shape[:2]
+        K = scale_camera_matrix(
+            K,
+            info_width,
+            info_height,
+            w,
+            h,
+        )
+
+        return (
+            color,
+            depth,
+            K,
+            stamp,
+            frame_id,
+            frame_seq,
+        )
+
+    def acquire_fresh_snapshot_with_retry(self):
+        """Acquire one post-request RGB-D snapshot, retrying up to 3 times."""
+        with self.frame_lock:
+            request_start_seq = int(self.latest_frame_seq)
+
+        last_error = None
+
+        self.get_logger().info(
+            "[FRAME] Waiting for a fresh synchronized RGB-D pair: "
+            f"max_attempts={FRAME_CAPTURE_MAX_ATTEMPTS}, "
+            f"wait_per_attempt={FRAME_CAPTURE_WAIT_SEC:.2f}s, "
+            f"sync_slop={SYNC_SLOP_SEC:.3f}s, "
+            f"start_seq={request_start_seq}"
+        )
+
+        # Every attempt still requires a frame newer than the service request.
+        # If a frame arrives, wait_for_fresh_snapshot returns immediately.
+        for attempt in range(1, FRAME_CAPTURE_MAX_ATTEMPTS + 1):
+            try:
+                snapshot = self.wait_for_fresh_snapshot(
+                    after_frame_seq=request_start_seq,
+                    timeout_sec=FRAME_CAPTURE_WAIT_SEC,
+                )
+
+                frame_seq = snapshot[-1]
+                self.get_logger().info(
+                    f"[FRAME] Fresh RGB-D acquired "
+                    f"(attempt={attempt}/{FRAME_CAPTURE_MAX_ATTEMPTS}, "
+                    f"seq={frame_seq})"
+                )
+                return snapshot[:-1]
+
+            except Exception as error:
+                last_error = error
+                self.get_logger().warning(
+                    f"[FRAME] Capture attempt {attempt}/"
+                    f"{FRAME_CAPTURE_MAX_ATTEMPTS} failed: {error}"
+                )
+
+        raise RuntimeError(
+            "CAMERA_FRAME_UNAVAILABLE: failed to acquire a fresh "
+            f"synchronized RGB-D frame after {FRAME_CAPTURE_MAX_ATTEMPTS} "
+            f"attempts. Last error: {last_error}"
         )
 
     def request_foundationpose(
@@ -1131,13 +1264,19 @@ class CupPickPerceptionPipeline(Node):
             return response
 
         try:
+            # The Trigger request itself is the capture event.  Do not reuse a
+            # cached pre-request frame: wait for a NEW synchronized RGB-D pair.
+            # Momentary RealSense drops are retried locally up to three times.
+            self.publish_grasp_status(
+                "CAMERA_FRAME_WAIT"
+            )
             (
                 color_bgr,
                 depth_m,
                 K,
                 stamp,
                 frame_id,
-            ) = self.get_snapshot()
+            ) = self.acquire_fresh_snapshot_with_retry()
 
             # ====================================================
             # 1. FoundationPose
