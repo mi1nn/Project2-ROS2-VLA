@@ -1269,10 +1269,9 @@ class Motion:
         # move_to_inspection_pose() 가 쌓아둔 키팅 트레이 voxel 이 살아남아야
         # 컴포넌트 2번 이후에도 "트레이 피하기"가 동작한다.
         #
-        # 실제로 여기서 게이트가 열리는 건 작업당 딱 한 번, 홈 자세 장시간
-        # 촬영(Controller 의 seed_scan) 뿐이다. 그 창이 끝나면 Controller 가
-        # freeze_octomap() 을 걸어서, 이후 관찰에서 이 호출은 이동만 하고
-        # set_octomap_mapping(True) 는 무시된다.
+        # 키팅 트레이 스캔 직후 Controller 가 freeze_octomap() 을 걸어두므로
+        # 여기서 부르는 set_octomap_mapping(True) 는 실제로는 항상 무시된다 —
+        # 관찰 자세에서는 새 voxel 을 쌓지 않는다.
         #
         # ponytail: a picked-up object leaves a ghost voxel behind (occupancy
         # only grows without an explicit clear), which can make a since-cleared
@@ -1287,9 +1286,9 @@ class Motion:
     def freeze_octomap(self):
         """Seal the map: no more accumulation, no more clearing, for this task.
 
-        Called once per task by Controller after the two seeding scans (the
-        keating tray at inspection_pose, then the long scan at home). Every
-        later move — pick, place, final inspection — plans against exactly
+        Called once per task by Controller right after the single seeding
+        scan (the keating tray at inspection_pose). Every later move —
+        observation, pick, place, final inspection — plans against exactly
         this map. Freezing rather than just closing the gate matters because
         several call sites (`move_to_observation_pose`,
         `move_to_inspection_pose`) reopen the gate on their own; the flag is

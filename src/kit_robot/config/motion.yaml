@@ -29,10 +29,9 @@ motion:
 
     # Octomap 게이트. eye-in-hand 라 팔이 움직이는 동안 쌓으면 voxel 이 번져서,
     # 카메라 포인트클라우드를 그대로 move_group 에 주지 않고 여기서 중계하며
-    # 멈춰 있을 때만 연다. 게이트가 열리는 건 작업당 두 번뿐이다: 키팅 트레이
-    # (inspection_pose) 1회, 홈 자세(observation_pose) 1회 장시간
-    # (controller.yaml: home_octomap_scan_sec). 그 뒤 Motion.freeze_octomap()
-    # 으로 지도를 잠그고, 픽·플레이스·최종 검사 전 구간이 그 지도만 본다.
+    # 멈춰 있을 때만 연다. 게이트가 열리는 건 작업당 딱 한 번, 키팅 트레이
+    # (inspection_pose) 뿐이다. 그 스캔이 끝나면 Motion.freeze_octomap() 으로
+    # 지도를 잠그고, 관찰·픽·플레이스·최종 검사 전 구간이 그 지도만 본다.
     # cloud_out 은 sensors_3d.yaml 의 point_cloud_topic 과 반드시 같아야 한다.
     octomap:
       enabled: true
