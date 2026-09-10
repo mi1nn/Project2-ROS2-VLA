@@ -50,4 +50,4 @@ octomap_frame: base_link
 # 이라 voxel 이 10mm면 물체 하나가 voxel 5~10개 정도로 아직은 형태가
 # 남지만, 더 키우면(예: 50mm) voxel 한 칸이 물체보다 커져 파지 자체가
 # 막힐 수 있다 — 이 위로는 올리지 말 것.
-octomap_resolution: 0.02
+octomap_resolution: 0.05
