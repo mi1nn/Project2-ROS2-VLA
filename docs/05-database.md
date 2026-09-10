@@ -21,6 +21,8 @@
 | `/kit/task_status` | Kit 상태 또는 현재 Component 변경 | `kit_executions` |
 | `/kit/component_result` | Component 최종 종료 | `component_executions`, `inventory` |
 
+현재 음성 노드는 성공·`wakeword_timeout`·일반 STT 실패에서만 `/kit/command_result`를 발행한다. 오디오 열기 실패, STT·LLM rate limit, `invalid_command`, 기타 OpenAI 실패는 메시지가 발행되지 않아 `commands`에 저장되지 않는다.
+
 ```text
 ROS 메시지 -> DBNode -> mapper 검증 -> MongoRepository
                                    -> 신규 SUCCESS이면 InventoryRepository
@@ -62,15 +64,15 @@ ROS 메시지 -> DBNode -> mapper 검증 -> MongoRepository
 
 | ID | 품목 | 초기 수량 |
 | ---: | --- | ---: |
-| 0 | 마스크 | 2 |
+| 0 | 마스크 | 20 |
 | 1 | 분유 | 20 |
-| 2 | 샴푸리필 | 1 |
-| 3 | 수세미 | 1 |
-| 4 | 양갱 | 1 |
-| 5 | 여행용티슈 | 1 |
-| 6 | 일회용숟가락 | 4 |
-| 7 | 컵라면 | 1 |
-| 8 | 햄 | 1 |
+| 2 | 샴푸리필 | 20 |
+| 3 | 수세미 | 20 |
+| 4 | 양갱 | 20 |
+| 5 | 여행용티슈 | 20 |
+| 6 | 일회용숟가락 | 20 |
+| 7 | 컵라면 | 20 |
+| 8 | 햄 | 20 |
 
 원본 스키마와 seed는 `infra/postgres/init`에 있다.
 
@@ -193,7 +195,7 @@ source /opt/ros/jazzy/setup.bash
 colcon build --symlink-install --packages-up-to kit_db
 source install/setup.bash
 
-docker compose up -d
+docker compose up -d postgres mongodb
 docker compose ps postgres mongodb
 
 set -a

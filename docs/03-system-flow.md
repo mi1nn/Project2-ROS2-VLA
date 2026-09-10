@@ -6,13 +6,13 @@
 
 ## 1. 전체 시퀀스
 
-실제 장비 연결 시의 흐름이다. 현재 Controller는 MotionDemo를 사용한다.
-음성 노드의 CommandResult 발행은 목표 계약이며 get_keyword.py에서는 아직 연결하지 않았다.
+실제 장비 연결 시의 흐름이다. 현재 Controller는 Motion를 사용한다.
+음성 노드는 `/kit/command_result` publisher를 사용한다. 현재는 성공·`wakeword_timeout`·일반 STT 실패에서만 `CommandResult`를 발행하며 나머지 실패 분기는 아직 발행하지 않는다.
 
 ```mermaid
 sequenceDiagram
     actor U as 사용자
-    participant V as command_node<br/>(kit_voice)
+    participant V as get_command<br/>(kit_voice)
     participant C as controller<br/>(kit_robot)
     participant P as position_estimation<br/>(kit_robot)
     participant D as object_detection<br/>(kit_vision)
@@ -26,14 +26,14 @@ sequenceDiagram
 
     C->>V: /get_command (task_id)
     U->>V: "Hello Rokey" + 음성 명령
-    Note over V,DB: /kit/command_result 발행은 음성 노드 후속 연결
+    V->>DB: /kit/command_result (현재 발행이 연결된 분기)
     V-->>C: command_json {kit_type, items[]}
     C->>C: 검증 → Component 리스트로 flatten
     C->>DB: /kit/task_status (RUNNING, VALIDATE)
 
     loop Component 하나씩 (재시도도 OBSERVE부터)
         C->>R: 관찰 자세 이동
-        C->>C: timer로 정착 대기, robot_posx 확보
+        C->>C: monotonic 시각 비교로 정착 대기, robot_posx 확보
         C->>P: /get_component_pose (component, robot_posx, max_age_sec)
         P->>P: 최신성 검사 → hand-eye 변환<br/>z_offset → 작업영역 검사 → 후보 선정
         P-->>C: target_pose + source
@@ -61,7 +61,7 @@ sequenceDiagram
 
 ### 2.0. 확정된 원칙
 
-- Controller는 Enum + timer + 비동기 service future로 구성한다.
+- Controller는 Enum + 반복 tick + 비동기 service future로 구성한다.
 - Motion 객체는 외부에서 주입받는다.
 - EXECUTE 한 번은 현재 Component의 pick/place 한 번만 처리한다.
 - 재시도와 다음 Component 실행은 OBSERVE에서 시작한다.
@@ -71,7 +71,8 @@ sequenceDiagram
 - EMERGENCY, 일시 정지, 실행 중 강제 중단은 이번 구현 범위에서 제외한다.
 
 Controller의 7단계 처리기, 서비스 future, 재시도, 결과 발행과 REPORT가 구현되어 있다.
-현재 main은 `Controller(motion=MotionDemo())`를 생성한다. 실제 Motion 구현·로봇 검증은 후속 작업이며 Controller가 사용하는 호출 계약은 5절을 따른다.
+현재 `main()`은 `Controller`를 생성한 뒤 `Motion(node)`을 연결한다.
+Motion은 실제 이동·파지·배치·복구를 담당하며 호출 계약은 5절을 따른다.
 실행·파라미터·검증 범위는 [06 Controller 실행 가이드](06-controller-guide.md)에 정리한다.
 
 ```mermaid
@@ -103,15 +104,15 @@ stateDiagram-v2
 | INSPECT | 검사 자세 이동 | 정착 후 검사 요청 한 번, future 확인 | REPORT |
 | REPORT | 미완료 결과 정리, 필요한 복귀·복구, 최종 결과 한 번 발행 | 자동 재시작 차단 시 유지 | 복귀 성공 및 재시작 허용 → IDLE |
 
-### 2.1 timer와 future 관리
+### 2.1 반복 tick과 future 관리
 
-- 상태 진입 작업과 매 tick 확인 작업을 구분한다. 이동·서비스 요청·최종 발행을 반복하지 않는다.
-- 정착은 준비 시각 비교로 처리한다. Controller에서 sleep이나 future 완료까지의 대기 루프를 사용하지 않는다.
-- 서비스 요청은 동시에 하나만 진행한다. 요청한 tick은 반환하고 이후 tick에서 완료 여부를 확인한다.
-- 서비스 준비 대기와 응답 대기는 별도 deadline으로 관리한다. future 예외와 응답 내용도 검사한다.
-- timeout 이후 늦은 결과를 현재 작업에 반영하지 않는다. future 취소는 서버 실행 취소를 보장하지 않는다.
+- 현재 ROS timer는 생성하지 않는다. `main()`이 `spin_once(node, timeout_sec=0.1)` 뒤 `timer_tick()`을 한 번 호출한다.
+- 상태 진입 작업과 이후 tick의 확인 작업을 구분해 이동·서비스 요청·최종 발행을 반복하지 않는다.
+- 정착은 monotonic 준비 시각 비교로 처리하며 future 완료를 기다리는 blocking 루프를 사용하지 않는다.
+- 서비스 요청은 동시에 하나만 진행하고, 요청 이후의 tick에서 완료 여부와 deadline을 확인한다.
+- timeout 이후 늦은 결과는 현재 작업에 반영하지 않는다. future 취소는 서버 실행 취소를 보장하지 않는다.
 - task_id는 단일 Controller 운영을 전제로 UTC 마이크로초 형식 `TASK-20260905T053012123456Z`로 IDLE 진입 시 한 번 생성한다.
-- 짧은 timer 주기는 Motion 호출의 비동기 실행을 의미하지 않는다. 실제 연결 시 executor 응답 처리와 호출 정체 여부를 확인한다. 호출 계약은 5절을 따르며 DSR 초기화와 executor 연결은 실제 Motion 구현 시 검증한다.
+- 동기 Motion 호출 중에는 `main()` 반복이 멈추므로 DSR 서비스 응답 처리와 호출 정체 여부를 실제 장비에서 검증해야 한다.
 
 ### 2.2 설정 소유권
 
@@ -122,18 +123,18 @@ stateDiagram-v2
 | 슬롯 좌표·접근 높이·이동 설정 | Motion 영역. Controller는 해석하지 않음 |
 | 파지 폭·힘 등 | Motion 영역 |
 | grasp_params.json의 z_offset | 기존 position_estimation이 target_pose에 반영하는 책임 유지. Controller에서 중복 보정하지 않음 |
-| timer·서비스 대기·정착·시도 제한 | Controller 파라미터 |
+| 서비스 대기·정착·시도 제한·재시작 간격 | Controller 파라미터 |
 
 `resource/controller.yaml`은 기존 setup.py의 resource 설치 규칙으로 배포한다.
 Controller는 ROS 파라미터에서 품목과 슬롯 이름을 받으며 좌표 파일은 읽지 않는다.
-실제 슬롯 좌표와 모션 설정 로드는 후속 Motion 구현 범위다. 기존 grasp 설정 형식은 유지한다.
+실제 슬롯 좌표와 이동 설정은 `config/motion.yaml`에서 로드하고,
+품목별 파지 설정은 `resource/grasp_params.json`에서 로드한다.
 
 서비스 준비 제한은 세 client가 공통 파라미터를 쓰되 상태별로 deadline을 새로 만든다.
 각 서비스의 응답 제한은 독립 파라미터다. 명령 60초는 요청부터 음성·STT·LLM 응답까지이며 키팅 소요 시간을 포함하지 않는다. 실제 지연에 따라 조정할 값이며 설정값은 06 문서에 정리한다.
 
-초기 비전 설정은 max_age_sec=1.0, 관찰·검사 정착 1.2초, exclude_taken=[]다.
-동일 시간 기준과 이동 완료 시점의 정확성을 전제로 실기에서 검증한다. 검사 화면은 완성
-트레이만 포함한다. 기존 서버는 ROI 필터나 촬영 시각 하한 요청을 지원하지 않는다.
+코드 기본값은 `max_age_sec=1.0`, 관찰·검사 정착 `1.2초`이며, 제공 YAML은 각각 `3.0초`, `4.0초`를 적용한다. `exclude_taken`은 빈 배열로 보낸다.
+동일 시간 기준과 이동 완료 시점의 정확성을 전제로 실기에서 검증한다. 검사 화면에는 완성 트레이만 포함해야 하며 현재 서버는 ROI 필터나 촬영 시각 하한 요청을 지원하지 않는다.
 세부 전제는 02 문서 2.6~2.7절을 따른다.
 
 ## 3. Component 단위 실행
@@ -164,8 +165,8 @@ Component 상태는 내부 PENDING, 최종 SUCCESS·FAILED·SKIPPED다. Attempt 
 
 ### 3.2 실행과 재시도
 
-한 Attempt는 OBSERVE 진입부터 좌표 획득과 pick/place 성공 또는 실패까지다.
-`max_attempts=2`는 최초 시도 1회와 재시도 1회, 총 2회를 뜻한다.
+`max_attempts`의 코드 기본값은 2이고, 제공 `controller.yaml`은 3을 적용한다. 이는 Controller가 기록하는 논리적 Attempt 상한이다.
+현재 `Motion.pick_component()`는 각 논리적 Attempt 안에서 최대 5회의 물리적 파지를 수행한다.
 
 1. OBSERVE에서 Attempt를 시작하고 관찰·정착 후 좌표를 비동기 요청한다.
 2. 응답 성공 시 target_pose의 6개 값이 유한한 수인지 검사하고 EXECUTE로 전환한다.
@@ -223,9 +224,9 @@ Component의 재고를 소급 차감하지 않는다. 기존 DB 집계·재고 �
 | 단계 | ① mask 무게중심 → ② depth 중앙값 → ③ 역투영 → polygon 첨부 | ④ hand-eye → ⑤ z_offset → ⑥ 작업영역 → ⑦ 파지 방향(mask 최소폭 축) → ⑧ 후보 선정 |
 | 산출 | `camera_xyz` + `masking_map` (토픽 발행) | `target_pose` (서비스 응답) |
 | 입력 | color / depth / camera_info | 검출 토픽 + request 의 `robot_posx` |
-| 의존성 | ultralytics, torch, GPU | numpy 만 |
+| 의존성 | ultralytics, torch, GPU | numpy, OpenCV, SciPy |
 
-**①②③ 이 한 노드에 묶인 이유:** 이 세 단계는 color 프레임, depth 프레임, camera_info 를 모두 필요로 한다. `object_detection` 만이 셋을 다 갖고 있으므로 여기서 끝내면 **시각 동기가 자동으로 맞는다.** 픽셀만 발행하고 나중에 depth 를 붙이면 `message_filters` 로 프레임을 짝지어야 하고, 그건 새 버그 표면이다.
+**①②③이 한 노드에 묶인 이유:** 이 세 단계는 color, depth, camera_info가 모두 필요하다. `object_detection`은 최신 color·depth stamp 차이가 기본 0.05초 이하일 때만 해당 쌍을 처리하고, 최신 camera_info를 사용해 역투영한다. 정확한 동기화가 자동으로 보장되는 것은 아니며 `message_filters`는 사용하지 않는다.
 
 **④ 가 로봇 패키지에 있는 이유:** hand-eye 행렬과 작업영역은 로봇 좌표계 지식이다. 그리고 이 노드는 torch 없이 도는 CPU 노드라 로봇 컨테이너에 가볍게 들어간다.
 
@@ -246,7 +247,7 @@ seg mask ──▶ 무게중심 픽셀 (cx, cy)         seg mask ──▶ polyg
         베이스 좌표 (x, y, z)                    최소 폭 축 각도 → rz 로 좌표계 변환
                 │                                            │       ← 여기부터 position_estimation 담당
                 ▼                                            │
-   z += 품목별 z_offset, 작업영역 클램프                          │
+   z += 품목별 z_offset, MIN_DEPTH 하한 적용, 작업영역 범위 검사    │
                 │                                            │
                 └──────────────────┬─────────────────────────┘
                                     ▼
@@ -279,7 +280,7 @@ Z = cz
 **④ hand-eye 변환** — 레퍼런스 `transform_to_base` 그대로.
 
 ```python
-base2gripper = pose_matrix(*get_current_posx()[0])   # ZYZ 오일러 → 4x4
+base2gripper = pose_matrix(*robot_posx)               # request로 받은 mm·deg 자세 → 4x4
 base2cam     = base2gripper @ gripper2cam            # T_gripper2camera.npy
 base_xyz     = (base2cam @ [X, Y, Z, 1])[:3]
 ```
@@ -338,7 +339,7 @@ if __name__ == "__main__":
     print("ok")
 ```
 
-`python3 position_estimation.py` 로 바로 돈다. 캘리브레이션 자체의 정확도는 `reference/corecode/Calibration_Tutorial/verify.py` 로 확인한다.
+저장소 루트에서 `python3 src/kit_robot/kit_robot/position_estimation.py`로 self-check를 실행한다.
 
 ---
 
@@ -350,9 +351,9 @@ Controller는 외부에서 주입된 객체만 사용한다. Motion은 다음 �
 
 | 메서드 | 반환·역할 |
 | --- | --- |
-| `move_home() -> None` | 대기 자세 이동과 그리퍼 개방 완료 |
-| `move_to_observation_pose() -> None` | 관찰 자세 이동 완료 |
-| `move_to_inspection_pose() -> None` | 검사 자세 이동 완료 |
+| `move_home() -> int` | 홈 관절 자세로 이동하고 DSR 성공 코드 `0` 반환 |
+| `move_to_observation_pose() -> int` | 관찰 자세로 이동하고 DSR 성공 코드 `0` 반환 |
+| `move_to_inspection_pose() -> int` | 검사 자세로 이동하고 DSR 성공 코드 `0` 반환 |
 | `get_current_pose() -> list[float]` | 베이스 TCP 자세 6개, mm·deg·ZYZ |
 | `pick_component(component_name, target_pose) -> bool` | 파지 확인 성공 True, 재시도 가능한 파지 실패 False |
 | `place_component(component_name, slot_name) -> None` | 슬롯 이름으로 좌표 조회 후 배치 완료 |
@@ -362,15 +363,14 @@ Controller는 외부에서 주입된 객체만 사용한다. Motion은 다음 �
 DSR·RG2를 직접 호출하거나 슬롯 좌표·파지 파라미터를 해석하지 않는다.
 기존 position_estimation이 적용하는 z_offset을 다시 적용하지 않는다.
 
-### 5.2 현재 데모와 실제 Motion의 경계
+### 5.2 실제 Motion 연결
 
-motion_demo.py의 MotionDemo는 호출 로그만 출력하고 이동은 즉시 완료, 파지는 항상
-성공으로 처리한다. TCP 자세는 가상 0 값 6개다. 실제 이동·파지 확인·좌표 정확성은 검증하지 않는다.
-실제 모션 구현을 연결하려면 main의 주입 객체를 교체한다. 현재 실행 중 전환용 파라미터는 없다.
+현재 Controller 실행 진입점에는 실제 `Motion`이 연결되어 있다.
+Motion은 DSR_ROBOT2 초기화, RG2 연결, 모션·슬롯 설정 로드,
+품목별 파지 설정 로드와 접근·파지·배치·복구를 담당한다.
 
-실제 Motion은 로봇 초기화, 슬롯 좌표와 파지 설정 로드, 접근·파지·배치·복구를 담당한다.
-이전 문서의 init/home/pick/place 모듈 함수 예시는 현재 Controller 호출 방식이 아니다.
-DSR 초기화 순서와 동기 호출 중 응답을 처리할 executor 구성은 Motion 통합 시 확인한다.
+실행 중 실제 Motion과 데모 구현을 전환하는 파라미터는 없다.
+DSR 초기화 순서와 동기 Motion 호출 중 ROS 응답 처리는 실제 장비에서 검증한다.
 
 ### 5.3 REPORT의 복귀 처리
 
@@ -400,8 +400,8 @@ future 예외·준비 timeout은 자동 재시작을 차단한다. 서버의 이
 | EMERGENCY | 로봇 통신 두절·충돌·긴급 정지에 대한 별도 중단 프로토콜 | 이번 범위 밖. 실제 중단·감지 기능이 구현되었다고 가정하지 않음 |
 
 Motion 호출과 서비스 응답 처리에서 잡은 예외는 TASK_FATAL로 처리한다.
-timer 전체를 감싸는 공통 예외 처리는 없으므로 메시지 직렬화·발행 등 모든 예외가
-자동 복구된다고 가정하지 않는다. 실제 장비 오류의 세부 분류는 Motion 통합 시 확인한다.
+`spin_once()`와 `timer_tick()`을 반복하는 `main()` 루프 전체를 감싸는 공통 예외 처리는 없으므로 메시지 직렬화·발행 등 모든 예외가 자동 복구된다고 가정하지 않는다.
+실제 Motion은 연결되어 있지만 장비 오류의 세부 분류와 DSR 응답 처리는 실기에서 확인해야 한다.
 TASK_FATAL과 자동 재시작 차단은 별개다. 현재 좌표·검사·배치 오류는 최종 복귀가 성공하면
 설정된 간격 후 새 명령을 받을 수 있다. 명령 통신 오류·크레딧 소진·미지 명령 오류와
 안전 복구 실패는 재시작을 차단한다.

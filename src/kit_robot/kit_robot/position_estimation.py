@@ -143,7 +143,7 @@ def load_gripper2cam(path, logger=None):
 
 def load_grasp_z_offsets(path, logger=None):
     """resource/grasp_params.json 에서 클래스별 z_offset 만 뽑는다. width/force 등 나머지
-    필드는 motion.py/grasp.py 몫. 파일이 없으면 빈 dict — 호출부가 DEPTH_OFFSET 기본값을 쓴다."""
+    필드는 motion.py 몫. 파일이 없으면 빈 dict — 호출부가 DEPTH_OFFSET 기본값을 쓴다."""
     if not os.path.isfile(path):
         if logger:
             logger.warn(f"grasp_params.json 없음 ({path}) — 전 품목 DEPTH_OFFSET 기본값 사용")

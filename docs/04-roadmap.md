@@ -2,6 +2,9 @@
 
 관련 문서: [01 아키텍처](01-architecture.md) · [02 인터페이스 계약](02-interfaces.md) · [03 시스템 플로우](03-system-flow.md) · [05 데이터베이스](05-database.md)
 
+> 이 문서는 2026-09-02 시점에 작성한 10일 개발 계획 기록이다. 현재 구현 상태와 실행 방법은 [06 Controller 가이드](06-controller-guide.md)와 [07 테스트 시나리오](07-test-scenario.md)를 기준으로 한다.
+> 본문의 `reference/` 경로도 당시 참고 자료의 출처 기록이며 현재 브랜치에는 해당 디렉터리가 없다.
+
 **기간 가정:** 2026-09-02 착수, **2026-09-11 완성 목표** (10일). 이 전제로 아래 일정을 짰다.
 
 ---
@@ -51,7 +54,7 @@ reference/corecode/Calibration_Tutorial/
 | --- | --- | --- |
 | 팀원의 YOLO seg 모델 | Day 5 실물 검출 | **Day 2 의 mock 발행자.** 고정 `DetectionArray` 를 1Hz 로 흘려 `position_estimation` 결선을 먼저 끝낸다 |
 | 로봇 상태 토픽(posx) 부재 | position_estimation 의 hand-eye 입력 | **이미 우회됨.** controller 가 request 에 `robot_posx` 를 담는다 ([02 2.5절](02-interfaces.md)) |
-| 팀원의 음성/LLM 노드 | Day 7 E2E | `controller_demo_services.py`와 MotionDemo로 서비스 응답과 상태 흐름 확인 |
+| 팀원의 음성/LLM 노드 | Day 7 E2E | 현재 브랜치에는 데모 서비스와 MotionDemo가 없으므로 실제 `/get_command` 서버를 실행하거나 별도 테스트 fixture가 필요 |
 | 로봇 실물 점유 (팀 공유) | Day 3-5 | 좌표 변환·상태머신은 로봇 없이 self-check 로 검증. 로봇 시간은 캘리브레이션과 파지 튜닝에만 쓴다 |
 | 키팅 트레이·품목 실물 | Day 8 튜닝 | 대체 물체로 파지 시퀀스만 먼저 검증 |
 
@@ -88,7 +91,7 @@ src/kit_vision/,  src/kit_voice/,  src/kit_robot/,  src/kit_db/
 
 ### Day 4 — 모션 기본기
 
-`motion.py` + `onrobot.py`. Motion 초기화 후 `move_home()`과 `pick_component()` / `place_component()`를 확인한다. 현재 main의 MotionDemo를 실제 객체로 교체하기 전 호출 계약을 맞춘다. 이 단계에서 `place_slots.json` 의 슬롯 좌표를 실측해 채운다 (`reference/cobot2/rokey_cobot2/rokey_cobot2/basic/get_current_pos.py` 로 현재 자세를 읽어 기록).
+`motion.py` + `onrobot.py`. 현재 `main()`은 `node.motion = Motion(node)`로 실제 Motion을 연결한다. 홈·관찰·검사 자세와 슬롯 좌표는 `config/motion.yaml`에서 읽고, 품목별 파지 설정은 `resource/grasp_params.json`에서 읽는다. 슬롯 좌표는 실제 트레이 위치에 맞춰 실측·검증해야 한다.
 
 **`WORKSPACE` 실측도 이 단계에서 함께 한다.** `position_estimation.py`의 `WORKSPACE`(현재 `{"x": (200,800), "y": (-400,400), "z": (0,500)}`, mm — [03 §4.3](03-system-flow.md)와 동일 값)는 실측 전 placeholder다.
 
@@ -112,11 +115,11 @@ src/kit_vision/,  src/kit_voice/,  src/kit_robot/,  src/kit_db/
 `controller_model.py`에서 명령을 검증하고 Component를 생성한다. `controller.py`의
 OBSERVE에서 좌표를 요청하고 handle_execute()에서 Component 하나를 처리한다.
 재시도와 다음 품목은 OBSERVE로 돌아가며 결과 확정 후 토픽을 발행한다.
-음성·비전 없이 확인할 때는 데모 서비스 세 개와 MotionDemo를 함께 사용한다.
+음성·비전 없이 확인할 수 있는 범위는 `controller_model.py` 단위 테스트와 `position_estimation.py` self-check다.
 
 ### Day 7 — 통합
 
-음성 노드 결합 + `/inspect_kit`. 명령 해석·검증이 끝나면 성공 여부와 관계없이 `/kit/command_result`를 발행한다. 검사 자세는 관찰 자세와 다를 수 있다(키팅 트레이를 봐야 함) — 별도 자세로 정의한다.
+음성 노드 결합 + `/inspect_kit`. 목표 계약은 성공·실패 모두 `/kit/command_result`를 발행하는 것이지만, 현재 구현은 성공·`wakeword_timeout`·일반 STT 실패에서만 발행한다. 검사 자세는 `config/motion.yaml`의 `inspection_pose`로 별도 정의되어 있다.
 
 ### Day 8 — 튜닝
 

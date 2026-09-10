@@ -32,7 +32,6 @@ setup(
         'console_scripts': [
             'controller = kit_robot.controller:main',
             'position_estimation = kit_robot.position_estimation:main',
-            'motion_test = kit_robot.motion_test:main',
         ],
     },
 )

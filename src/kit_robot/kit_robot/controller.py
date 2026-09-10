@@ -48,7 +48,7 @@ class TransitionCategory(Enum):
 class Controller(Node):
     '''Motion과 비동기 서비스를 연결해 Component 순차 실행과 결과 발행을 관리한다.'''
     def __init__(self, motion=None):
-        '''Motion을 주입받고 상태 처리기, ROS 파라미터, 서비스·토픽 및 timer를 구성한다.'''
+        '''Motion을 주입받고 상태 처리기, ROS 파라미터, 서비스·토픽을 구성한다.'''
         super().__init__("controller", namespace="/dsr01")
 
         # Motion 의존성과 상태 진입 표시: entered=True인 tick에서만 진입 작업을 수행한다.
@@ -56,10 +56,7 @@ class Controller(Node):
         self.state = State.IDLE
         self.state_entered = True
         
-        ## test
-        # self.timer = self.create_timer(0.1, self.timer_tick)
-
-        # 상태별 처리기 매핑: timer는 이 표에서 현재 상태의 메서드를 선택한다.
+        # 상태별 처리기 매핑: timer_tick은 이 표에서 현재 상태의 메서드를 선택한다.
         self.handlers = {
             State.IDLE: self.handle_idle,
             State.LISTEN: self.handle_listen,
@@ -184,8 +181,7 @@ class Controller(Node):
         if not math.isfinite(self.restart_delay) or self.restart_delay <= 0:
             raise ValueError("재시작 간격은 유한한 양수여야 합니다.")
 
-        # 상태 확인 주기 0.1초. 동기 Motion 호출 중에는 이 주기가 보장되지 않는다.
-        # self.timer = self.create_timer(0.1, self.timer_tick)
+        # main의 spin_once timeout은 0.1초다. 동기 Motion 호출 중에는 이 주기가 보장되지 않는다.
 
 
     def transition_to(
@@ -1197,14 +1193,12 @@ class Controller(Node):
 
 
 def main(args=None):
-    '''Motion를 주입한 Controller를 실행하고 종료 시 ROS 자원을 정리한다.'''
+    '''실제 Motion을 연결한 Controller를 실행하고 종료 시 ROS 자원을 정리한다.'''
     rclpy.init(args=args)
-    # node = Controller(motion=MotionDemo())
     node = Controller()
     node.motion = Motion(node)
 
     try:
-        # rclpy.spin(node)
         while rclpy.ok():
             rclpy.spin_once(node, timeout_sec = 0.1)
             node.timer_tick()
