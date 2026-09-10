@@ -1,0 +1,110 @@
+# joint_limits.yaml allows the dynamics properties specified in the URDF to be overwritten or augmented as needed
+# Specific joint properties can be changed with the keys [max_position, min_position, max_velocity, max_acceleration]
+# Joint limits can be turned off with [has_velocity_limits, has_acceleration_limits]
+
+# For beginners, we downscale velocity and acceleration limits.
+# You can always specify higher scaling factors (<= 1.0) in your motion requests.  # Increase the values below to 1.0 to always move at maximum speed.
+default_velocity_scaling_factor: 0.15
+default_acceleration_scaling_factor: 0.15
+
+joint_limits:
+  base_x:
+    has_velocity_limits: true
+    max_velocity: 0.5
+    has_acceleration_limits: true
+    max_acceleration: 0.5
+    min_position: -5.0
+    max_position: 5.0
+  base_yaw:
+    has_velocity_limits: true
+    max_velocity: 1.0
+    has_acceleration_limits: true
+    max_acceleration: 1.0
+    min_position: -3.141592653589793
+    max_position: 3.141592653589793
+
+  left_joint_1:
+    has_velocity_limits: true
+    max_velocity: 2.0944
+    has_acceleration_limits: true
+    max_acceleration: 2.0944
+    min_position: -6.2832
+    max_position: 6.2832
+  left_joint_2:
+    has_velocity_limits: true
+    max_velocity: 2.0944
+    has_acceleration_limits: true
+    max_acceleration: 2.0944
+    min_position: -1.6581
+    max_position: 1.6581
+  left_joint_3:
+    has_velocity_limits: true
+    max_velocity: 3.14
+    has_acceleration_limits: true
+    max_acceleration: 3.14
+    min_position: -2.3562
+    max_position: 2.3562
+  left_joint_4:
+    has_velocity_limits: true
+    max_velocity: 3.927
+    has_acceleration_limits: true
+    max_acceleration: 3.927
+    min_position: -3.14159
+    max_position: 3.14159
+  left_joint_5:
+    has_velocity_limits: true
+    max_velocity: 3.927
+    has_acceleration_limits: true
+    max_acceleration: 3.927
+    min_position: -2.3562
+    max_position: 2.3562
+  left_joint_6:
+    has_velocity_limits: true
+    max_velocity: 0.5236
+    has_acceleration_limits: true
+    max_acceleration: 0.5236
+    min_position: -3.14159
+    max_position: 3.14159
+
+  right_joint_1:
+    has_velocity_limits: true
+    max_velocity: 2.0944
+    has_acceleration_limits: true
+    max_acceleration: 2.0944
+    min_position: -3.14159
+    max_position: 3.14159
+  right_joint_2:
+    has_velocity_limits: true
+    max_velocity: 2.0944
+    has_acceleration_limits: true
+    max_acceleration: 2.0944
+    min_position: -1.6581
+    max_position: 1.6581
+  right_joint_3:
+    has_velocity_limits: true
+    max_velocity: 3.14
+    has_acceleration_limits: true
+    max_acceleration: 3.14
+    min_position: -2.3562
+    max_position: 2.3562
+  right_joint_4:
+    has_velocity_limits: true
+    max_velocity: 3.927
+    has_acceleration_limits: true
+    max_acceleration: 3.927
+    min_position: -3.14159
+    max_position: 3.14159
+  right_joint_5:
+    has_velocity_limits: true
+    max_velocity: 3.927
+    has_acceleration_limits: true
+    max_acceleration: 3.927
+    min_position: -2.3562
+    max_position: 2.3562
+  right_joint_6:
+    has_velocity_limits: true
+    max_velocity: 0.5236
+    has_acceleration_limits: true
+    max_acceleration: 0.5236
+    min_position: -3.14159
+    max_position: 3.14159

@@ -6,13 +6,12 @@
 
 ## 1. 전체 시퀀스
 
-실제 장비 연결 시의 흐름이다. 현재 Controller는 MotionDemo를 사용한다.
-음성 노드의 CommandResult 발행은 목표 계약이며 get_keyword.py에서는 아직 연결하지 않았다.
+기존 YOLO 좌표 경로로 실제 장비를 연결할 때의 의도된 흐름이다. 현재 `main()`은 실제 `Motion`을 생성하지만, `feature/grasp` 브랜치에는 Controller와 Motion 사이의 메서드 호환성 문제가 남아 있어 아래 전체 흐름을 그대로 실행할 수 있는 상태는 아니다. 음성 노드의 `CommandResult` publisher는 구현되어 있으나 일부 실패 분기에서는 아직 발행하지 않는다.
 
 ```mermaid
 sequenceDiagram
     actor U as 사용자
-    participant V as command_node<br/>(kit_voice)
+    participant V as get_command<br/>(kit_voice)
     participant C as controller<br/>(kit_robot)
     participant P as position_estimation<br/>(kit_robot)
     participant D as object_detection<br/>(kit_vision)
@@ -26,7 +25,7 @@ sequenceDiagram
 
     C->>V: /get_command (task_id)
     U->>V: "Hello Rokey" + 음성 명령
-    Note over V,DB: /kit/command_result 발행은 음성 노드 후속 연결
+    V->>DB: /kit/command_result (CommandResult)
     V-->>C: command_json {kit_type, items[]}
     C->>C: 검증 → Component 리스트로 flatten
     C->>DB: /kit/task_status (RUNNING, VALIDATE)
@@ -53,7 +52,7 @@ sequenceDiagram
 
 **검출은 루프 밖에서 계속 돈다.** `object_detection` 은 controller 가 뭘 하든 상관없이 발행한다. `position_estimation` 은 그걸 받아 캐시만 하고, 계산은 요청이 올 때 한다. 이 덕분에 로봇을 세워둔 채 `ros2 topic echo /detection/objects` 로 인식 상태를 볼 수 있다.
 
-**controller 가 `robot_posx` 를 채워 보낸다.** `position_estimation` 은 로봇 API 를 모른다. 근거는 [02 인터페이스 2.5절](02-interfaces.md).
+**controller가 `robot_posx`를 채워 보낸다.** Motion이 TF에서 현재 자세를 읽고, `position_estimation`은 로봇 이동 API나 TF를 직접 다루지 않는다. 근거는 [02 인터페이스 2.5절](02-interfaces.md).
 
 ---
 
@@ -71,7 +70,7 @@ sequenceDiagram
 - EMERGENCY, 일시 정지, 실행 중 강제 중단은 이번 구현 범위에서 제외한다.
 
 Controller의 7단계 처리기, 서비스 future, 재시도, 결과 발행과 REPORT가 구현되어 있다.
-현재 main은 `Controller(motion=MotionDemo())`를 생성한다. 실제 Motion 구현·로봇 검증은 후속 작업이며 Controller가 사용하는 호출 계약은 5절을 따른다.
+현재 main은 Controller를 생성한 뒤 실제 `Motion(node)`을 연결한다. 다만 Controller가 삭제된 `set_octomap_exclusion_component()`를 호출하고 `move_to_inspection_pose(clear_before=True)`를 호출하는 반면 현재 Motion은 해당 메서드/인자를 제공하지 않는다. 이 두 계약이 정리되기 전에는 전체 상태머신의 실기 실행을 완료 상태로 보지 않는다.
 실행·파라미터·검증 범위는 [06 Controller 실행 가이드](06-controller-guide.md)에 정리한다.
 
 ```mermaid
@@ -111,7 +110,7 @@ stateDiagram-v2
 - 서비스 준비 대기와 응답 대기는 별도 deadline으로 관리한다. future 예외와 응답 내용도 검사한다.
 - timeout 이후 늦은 결과를 현재 작업에 반영하지 않는다. future 취소는 서버 실행 취소를 보장하지 않는다.
 - task_id는 단일 Controller 운영을 전제로 UTC 마이크로초 형식 `TASK-20260905T053012123456Z`로 IDLE 진입 시 한 번 생성한다.
-- 짧은 timer 주기는 Motion 호출의 비동기 실행을 의미하지 않는다. 실제 연결 시 executor 응답 처리와 호출 정체 여부를 확인한다. 호출 계약은 5절을 따르며 DSR 초기화와 executor 연결은 실제 Motion 구현 시 검증한다.
+- 짧은 timer 주기는 Motion 호출의 비동기 실행을 의미하지 않는다. Motion은 내부 전용 노드와 `MultiThreadedExecutor`로 MoveIt2 응답을 처리하지만, Controller timer에서 호출한 고수준 이동 메서드는 완료될 때까지 동기적으로 기다린다.
 
 ### 2.2 설정 소유권
 
@@ -119,19 +118,19 @@ stateDiagram-v2
 | --- | --- |
 | 지원 품목 | controller.yaml의 supported_names. 현재 class_names.json과 수동으로 일치시켜 관리 |
 | 공용 슬롯 이름 | controller.yaml의 slot_names 순서로 품목 구분 없이 할당. 현재 slot_1~slot_6 |
-| 슬롯 좌표·접근 높이·이동 설정 | Motion 영역. Controller는 해석하지 않음 |
+| 슬롯 좌표·접근 높이·이동 설정 | `motion.yaml`의 Motion 영역. Controller는 해석하지 않음 |
 | 파지 폭·힘 등 | Motion 영역 |
 | grasp_params.json의 z_offset | 기존 position_estimation이 target_pose에 반영하는 책임 유지. Controller에서 중복 보정하지 않음 |
 | timer·서비스 대기·정착·시도 제한 | Controller 파라미터 |
 
 `resource/controller.yaml`은 기존 setup.py의 resource 설치 규칙으로 배포한다.
 Controller는 ROS 파라미터에서 품목과 슬롯 이름을 받으며 좌표 파일은 읽지 않는다.
-실제 슬롯 좌표와 모션 설정 로드는 후속 Motion 구현 범위다. 기존 grasp 설정 형식은 유지한다.
+실제 슬롯 좌표와 MoveIt2 설정은 `motion.yaml`, 품목별 기존 파지 설정은 `grasp_params.json`에서 Motion이 읽는다.
 
 서비스 준비 제한은 세 client가 공통 파라미터를 쓰되 상태별로 deadline을 새로 만든다.
 각 서비스의 응답 제한은 독립 파라미터다. 명령 60초는 요청부터 음성·STT·LLM 응답까지이며 키팅 소요 시간을 포함하지 않는다. 실제 지연에 따라 조정할 값이며 설정값은 06 문서에 정리한다.
 
-초기 비전 설정은 max_age_sec=1.0, 관찰·검사 정착 1.2초, exclude_taken=[]다.
+코드 기본값은 max_age_sec=1.0, 관찰·검사 정착 1.2초다. 현재 `controller.yaml`은 실기값으로 3.0초와 4.0초를 사용하며, exclude_taken은 빈 배열로 보낸다.
 동일 시간 기준과 이동 완료 시점의 정확성을 전제로 실기에서 검증한다. 검사 화면은 완성
 트레이만 포함한다. 기존 서버는 ROI 필터나 촬영 시각 하한 요청을 지원하지 않는다.
 세부 전제는 02 문서 2.6~2.7절을 따른다.
@@ -140,7 +139,7 @@ Controller는 ROS 파라미터에서 품목과 슬롯 이름을 받으며 좌표
 
 ### 3.1 검증·flatten·슬롯 예약
 
-controller_model.py는 ROS·DSR 의존성 없이 명령 검증, Component·Attempt 데이터,
+controller_model.py는 ROS·로봇 런타임 의존성 없이 명령 검증, Component·Attempt 데이터,
 flatten, 슬롯 예약, expected_counts 생성을 담당한다.
 
 - kit_type은 문자열, items는 비어 있지 않은 배열이어야 한다.
@@ -210,7 +209,7 @@ Component의 재고를 소급 차감하지 않는다. 기존 DB 집계·재고 �
 
 ---
 
-## 4. 파지 좌표 파이프라인
+## 4. 기존 YOLO 2D 파지 좌표 파이프라인
 
 이 프로젝트에서 내가 맡은 가장 핵심적인 부분이다. YOLO 가 준 픽셀을 로봇이 움직일 수 있는 좌표로 바꾸는 구간.
 
@@ -223,7 +222,7 @@ Component의 재고를 소급 차감하지 않는다. 기존 DB 집계·재고 �
 | 단계 | ① mask 무게중심 → ② depth 중앙값 → ③ 역투영 → polygon 첨부 | ④ hand-eye → ⑤ z_offset → ⑥ 작업영역 → ⑦ 파지 방향(mask 최소폭 축) → ⑧ 후보 선정 |
 | 산출 | `camera_xyz` + `masking_map` (토픽 발행) | `target_pose` (서비스 응답) |
 | 입력 | color / depth / camera_info | 검출 토픽 + request 의 `robot_posx` |
-| 의존성 | ultralytics, torch, GPU | numpy 만 |
+| 의존성 | ultralytics, torch, GPU | numpy, scipy, OpenCV |
 
 **①②③ 이 한 노드에 묶인 이유:** 이 세 단계는 color 프레임, depth 프레임, camera_info 를 모두 필요로 한다. `object_detection` 만이 셋을 다 갖고 있으므로 여기서 끝내면 **시각 동기가 자동으로 맞는다.** 픽셀만 발행하고 나중에 depth 를 붙이면 `message_filters` 로 프레임을 짝지어야 하고, 그건 새 버그 표면이다.
 
@@ -279,7 +278,7 @@ Z = cz
 **④ hand-eye 변환** — 레퍼런스 `transform_to_base` 그대로.
 
 ```python
-base2gripper = pose_matrix(*get_current_posx()[0])   # ZYZ 오일러 → 4x4
+base2gripper = pose_matrix(*request.robot_posx)      # ZYZ 오일러 → 4x4
 base2cam     = base2gripper @ gripper2cam            # T_gripper2camera.npy
 base_xyz     = (base2cam @ [X, Y, Z, 1])[:3]
 ```
@@ -320,7 +319,7 @@ short_side_angle = rect[2] if rect[1][0] < rect[1][1] else rect[2] + 90
 WORKSPACE = {"x": (200, 800), "y": (-400, 400), "z": (0, 500)}  # mm, 실측 후 조정
 ```
 
-범위 밖이면 그 품목을 건너뛰고 `detail` 에 사유를 기록한다. `movel` 로 넘기지 않는다. 이건 안전 장치이므로 생략하지 않는다.
+범위 밖이면 그 품목을 건너뛰고 `detail`에 사유를 기록한다. Motion의 `move_pose`/`move_linear`로 넘기지 않는다. 이건 안전 장치이므로 생략하지 않는다.
 
 ### 4.4 검증
 
@@ -340,6 +339,15 @@ if __name__ == "__main__":
 
 `python3 position_estimation.py` 로 바로 돈다. 캘리브레이션 자체의 정확도는 `reference/corecode/Calibration_Tutorial/verify.py` 로 확인한다.
 
+### 4.5 FoundationPose + GraspGenX 독립 파지 경로
+
+이 경로는 위 YOLO 2D 파이프라인이나 Controller 상태머신에 아직 연결되어 있지 않다. `grasp_pick_test.py`가 외부에서 만들어진 다음 파일을 직접 읽는다.
+
+- NPZ: `(N, 4, 4)` 형태의 `grasp_poses`와 동일 길이의 `scores`
+- NPY: 대상 객체의 완성 포인트클라우드 `(N, 3)`
+
+Motion은 점수 내림차순으로 후보를 정렬하고 `T_base_camera @ T_camera_grasp @ T_grasp_tool @ T_tool_eef`로 MoveIt 목표를 만든다. 기본 실행은 변환 결과만 출력하는 dry-run이다. `--execute`를 지정하면 검증 플래그를 확인한 뒤 pregrasp 이동, 직선 접근, RG2 파지, 후퇴를 후보별로 시도한다. `--move-observation`은 `--execute`가 없어도 실제 관찰 자세 이동을 명령하므로 dry-run과 별개로 주의해야 한다.
+
 ---
 
 ## 5. Controller가 사용하는 Motion 객체
@@ -350,27 +358,53 @@ Controller는 외부에서 주입된 객체만 사용한다. Motion은 다음 �
 
 | 메서드 | 반환·역할 |
 | --- | --- |
-| `move_home() -> None` | 대기 자세 이동과 그리퍼 개방 완료 |
-| `move_to_observation_pose() -> None` | 관찰 자세 이동 완료 |
-| `move_to_inspection_pose() -> None` | 검사 자세 이동 완료 |
-| `get_current_pose() -> list[float]` | 베이스 TCP 자세 6개, mm·deg·ZYZ |
+| `move_home() -> bool` | `motion.yaml`의 home 관절 자세로 이동 |
+| `move_to_observation_pose() -> bool` | 관찰 자세 이동 완료 후 OctoMap 중계 개방 |
+| `move_to_inspection_pose() -> bool` | 검사 자세 이동, OctoMap clear 후 중계 개방 |
+| `get_current_pose() -> list[float]` | `base_frame ← eef_link` TF를 mm·deg·ZYZ 6개 값으로 반환 |
 | `pick_component(component_name, target_pose) -> bool` | 파지 확인 성공 True, 재시도 가능한 파지 실패 False |
-| `place_component(component_name, slot_name) -> None` | 슬롯 이름으로 좌표 조회 후 배치 완료 |
-| `recover_to_safe_pose() -> None` | 그리퍼 개방과 안전 자세 복귀 완료 |
+| `place_component(component_name, slot_name) -> bool` | 슬롯 이름으로 좌표 조회 후 배치 완료 |
+| `recover_to_safe_pose() -> None` | 그리퍼를 열고 현재 로봇 자세를 유지 |
+| `set_octomap_mapping(enabled) -> bool` | Octomap 입력 포인트클라우드 게이트 개폐. 비활성 설정이면 False |
+| `clear_octomap() -> bool` | MoveIt octomap voxel 전체 삭제 |
+
+Motion은 시작 시 OctoMap 중계를 열고, 관찰 자세에서는 기존 지도를 지우지 않은 채 중계를 다시 연다. 검사 자세에서는 전체 지도를 지운 뒤 중계를 연다. `move_joint`·`move_pose`·`move_linear`가 시작되면 eye-in-hand 카메라 이동 중 voxel이 번지는 것을 막기 위해 중계를 닫는다.
+
+기존 `pick_component()`는 target_pose 중심에 파지 폭 기반 구형 제외 영역을 설정하고 전체 OctoMap을 지운 뒤 기본 1초 동안 다시 스캔한다. 성공·실패 후에는 제외 영역을 해제한다. `place_component()`는 검사 자세로 이동해 배치 영역 지도를 다시 만든 후 슬롯으로 이동한다. GraspGenX 경로는 완성 객체 포인트클라우드의 bounding box로 중심과 반지름을 구하고, margin과 최소·최대 반지름을 적용해 같은 구형 제외를 사용한다.
+
+Motion 초기화 시 `<octomap>` ACM에서 기본 `link_6`, `tool0`, `rg2_base_link`의 충돌을 허용한다. 고정 `default_keepout_box`는 planning scene에 추가하고 RViz marker는 반투명 **빨간색**으로 발행한다. 현재 `motion.yaml`의 키는 `enable`이지만 코드는 `enabled`를 읽으므로, 명시값이 아니라 코드 기본값 `true`로 활성화되는 상태다.
+
+현재 Controller와 Motion의 OctoMap 계약에는 두 불일치가 있다.
+
+- Controller는 현재 Motion에 없는 `set_octomap_exclusion_component()`를 호출한다.
+- Controller는 인자를 받지 않는 `move_to_inspection_pose()`에 `clear_before=True`를 전달한다.
+
+두 호출을 정리하기 전에는 Controller 전체 실행을 시작하지 않는다.
+
+#### OctoMap 센서 설정 메모 (2026-09-09)
+
+MoveIt 쪽 3D 센서 설정의 현재 기준만 남긴다.
+
+- **voxel 크기는 0.01m 로 복귀.** 8mm→4mm→2mm 로 낮춰 파지 정밀도를 올리려 했으나,
+  D435 깊이 노이즈 바닥(작업 거리 30~70cm 에서 수 mm 요동)보다 voxel 이 잘게 썰리면서
+  평평한 테이블/트레이 표면이 울퉁불퉁하게 잡히는 문제가 심해져 10mm 로 되돌렸다
+  (`sensors_3d.yaml: octomap_resolution`). 물체 폭이 50~110mm(`grasp_params.json`)라
+  10mm 에서도 형태는 voxel 5~10개로 남는다 — 이 위로는 올리지 않는다.
+- **RealSense 후처리 필터를 depth 프레임 단계에서 켰다.** 평면 노이즈는 옥토맵/필터
+  코드가 아니라 raw depth 자체의 픽셀별 문제라 직접 스무딩 코드를 짜지 않고,
+  librealsense 의 decimation/spatial/temporal 필터를 `bringup.launch.py` 의
+  `realsense2_camera_node` 파라미터로 켰다.
+- **Motion의 현재 cloud relay는 구형 제외 영역만 적용한다.** 이전 문서에 있던 `_remove_outlier_points`, `_flatten_floor_points`, polygon mask, 첫 detection 대기 함수는 현재 `motion.py`에 없다. 관련 설정과 시험도 현재 코드 기준으로 다시 작성해야 한다.
 
 동작 메서드는 완료 후 반환하며 수행 불가 시 예외를 발생시킨다. Controller는
 DSR·RG2를 직접 호출하거나 슬롯 좌표·파지 파라미터를 해석하지 않는다.
 기존 position_estimation이 적용하는 z_offset을 다시 적용하지 않는다.
 
-### 5.2 현재 데모와 실제 Motion의 경계
+### 5.2 기존 E2E와 GraspGenX 시험의 경계
 
-motion_demo.py의 MotionDemo는 호출 로그만 출력하고 이동은 즉시 완료, 파지는 항상
-성공으로 처리한다. TCP 자세는 가상 0 값 6개다. 실제 이동·파지 확인·좌표 정확성은 검증하지 않는다.
-실제 모션 구현을 연결하려면 main의 주입 객체를 교체한다. 현재 실행 중 전환용 파라미터는 없다.
+Controller는 `pick_component(component_name, target_pose)`를 호출하는 기존 YOLO/좌표 서비스 경로만 사용한다. `pick_graspgenx_candidates()` 호출은 `grasp_pick_test.py`에만 있으며 Controller에는 후보 파일, 점수, 완성 객체 포인트클라우드를 전달하는 상태나 인터페이스가 없다.
 
-실제 Motion은 로봇 초기화, 슬롯 좌표와 파지 설정 로드, 접근·파지·배치·복구를 담당한다.
-이전 문서의 init/home/pick/place 모듈 함수 예시는 현재 Controller 호출 방식이 아니다.
-DSR 초기화 순서와 동기 호출 중 응답을 처리할 executor 구성은 Motion 통합 시 확인한다.
+GraspGenX 스크립트의 기본값은 변환-only dry-run이지만 Motion 객체 전체를 초기화하므로 MoveIt 액션·서비스와 TF가 준비되어 있어야 하며 RG2 연결도 시도한다. 실제 이동은 `--execute`로 켜고, 관찰 자세 이동은 별도 `--move-observation` 옵션으로 켠다. 실행 순서는 [06 Controller 가이드](06-controller-guide.md)를 따른다.
 
 ### 5.3 REPORT의 복귀 처리
 
@@ -415,5 +449,5 @@ out_of_workspace는 원인을 단정하지 않고 좌표 사용을 거부한 뒤
 기획서가 확장 기능으로 분류한 것들. 지금 설계에 자리만 남겨두고 구현하지 않는다.
 
 - 검사 결과 기반 **자동 보정** (누락 품목 추가 파지, 오투입 품목 방출) — `InspectKit` 응답의 `missing`/`unexpected` 가 이미 필요한 정보를 담고 있고, 보정도 결국 Component 실행이다. 보정 대상과 슬롯을 별도로 검증한 후 `OBSERVE`부터 다시 실행하는 정책이 필요하다.
-- **3차원 형상 기반 파지점** — 현재는 mask 무게중심(xy) + mask 최소폭 축(rz, [§4.2](#42-단계별-상세)) + 수직 하향(rx,ry) 조합이다. 물체가 기울어진 채로 놓였을 때의 완전한 3D 파지 자세(포인트클라우드 기반)는 별개 작업으로 남긴다.
+- **3차원 형상 기반 파지점의 Controller 통합** — 기존 E2E는 mask 무게중심(xy) + mask 최소폭 축(rz, [§4.2](#42-단계별-상세)) + 수직 하향(rx,ry) 조합을 사용한다. FoundationPose + GraspGenX의 6D 후보 실행은 독립 스크립트까지 구현되었지만, 후보 생성·전달·실행을 Controller 상태머신에 연결하는 작업은 남아 있다.
 - **DB 분석 기능 확장** — 현재 로봇은 `/kit/task_status`와 `/kit/component_result`를 발행하고, 음성 노드는 `/kit/command_result`를 발행한다. DB 노드는 이를 저장하고 신규 `SUCCESS` Component의 재고를 차감한다. 집계 대시보드나 장기 분석 기능은 확장 범위다.

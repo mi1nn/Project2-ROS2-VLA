@@ -1,0 +1,106 @@
+# This config file is used by ros2_control (controller_manager)
+/**:
+  controller_manager:
+    ros__parameters:
+      update_rate: 100  # Hz
+
+      joint_state_broadcaster:
+        type: joint_state_broadcaster/JointStateBroadcaster
+
+      dsr_moveit_controller:
+        type: joint_trajectory_controller/JointTrajectoryController
+
+      dsr_controller2:
+        type: dsr_controller2/RobotController
+
+      whole_body_controller:
+        type: dsr_mobile_wbc2/WholeBodyController
+
+      diff_drive_controller:
+        type: diff_drive_controller/DiffDriveController
+
+  joint_state_broadcaster:
+    ros__parameters: {}
+
+  dsr_controller2:
+    ros__parameters:
+      joints:
+        - arm_joint_1
+        - arm_joint_2
+        - arm_joint_3
+        - arm_joint_4
+        - arm_joint_5
+        - arm_joint_6
+
+  dsr_moveit_controller:
+    ros__parameters:
+      joints:
+        - arm_joint_1
+        - arm_joint_2
+        - arm_joint_3
+        - arm_joint_4
+        - arm_joint_5
+        - arm_joint_6
+      command_interfaces:
+        - position
+        - velocity
+      state_interfaces:
+        - position
+        - velocity
+      allow_nonzero_velocity_at_trajectory_end: true
+
+  whole_body_controller:
+    ros__parameters:
+      enable_base_wbc: true
+      base_cmd_topic: /r100_m1013/diff_drive_controller/cmd_vel
+      base_cmd_msg_type: twist_stamped
+      forward_action_ns: dsr_moveit_controller/follow_joint_trajectory
+      max_linear_vel: 0.5
+      max_angular_vel: 1.0
+      base_linear_sign: -1.0
+      base_angular_sign: -1.0
+      base_multi_dof_joint_name: base_planar_joint
+      base_x_joint_name: base_x
+      base_y_joint_name: base_y
+      base_yaw_joint_name: base_yaw
+      arm_joint_state_topic: /r100_m1013/joint_states
+      whole_joint_state_topic: /r100_m1013/joint_states_whole
+      idle_base_state_publish_period_sec: 0.01
+      base_state_keepalive_duration_sec: 2.0
+      joint_state_time_offset_sec: 0.02
+
+  diff_drive_controller:
+    ros__parameters:
+      use_stamped_vel: true
+      left_wheel_names: ["left_wheel_joint"]
+      right_wheel_names: ["right_wheel_joint"]
+      wheel_separation: 0.58
+      wheel_radius: 0.080
+
+      linear:
+        x:
+          has_velocity_limits: true
+          max_velocity: 1.0
+          has_acceleration_limits: true
+          max_acceleration: 0.8
+
+      angular:
+        z:
+          has_velocity_limits: true
+          max_velocity: 2.0
+          has_acceleration_limits: true
+          max_acceleration: 1.5
+
+      cmd_vel_timeout: 0.5
+      publish_rate: 100.0
+      # odom->base_link TF is provided by robot_state_publisher from base_x/base_y/base_yaw.
+      # Keep single TF source to avoid RViz/MoveIt state sync glitches after execute.
+      enable_odom_tf: false
+      tf_frame_prefix_enable: false
+      odom_frame_id: odom
+      base_frame_id: base_link
+      pose_covariance_diagonal: [0.001, 0.001, 0.0, 0.0, 0.0, 0.01]
+      twist_covariance_diagonal: [0.001, 0.0, 0.0, 0.0, 0.0, 0.01]
+      open_loop: true
+      wheel_separation_multiplier: 1.0
+      wheel_radius_multiplier: 1.0

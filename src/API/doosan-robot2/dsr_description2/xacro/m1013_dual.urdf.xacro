@@ -1,0 +1,46 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="m1013_dual">
+  <xacro:arg name="color" default="white"/>
+  <xacro:arg name="arm_prefix" default="arm_"/>
+  <xacro:arg name="arm2_prefix" default="arm2_"/>
+  <xacro:arg name="arm_spacing" default="0.6"/>
+  <xacro:arg name="enable_ros2_control" default="true"/>
+  <xacro:arg name="host" default=""/>
+  <xacro:arg name="port" default=""/>
+  <xacro:arg name="rt_host" default=""/>
+  <xacro:arg name="mode" default=""/>
+  <xacro:arg name="model" default="m1013"/>
+  <xacro:arg name="update_rate" default=""/>
+  <xacro:arg name="arm2_host" default=""/>
+  <xacro:arg name="arm2_port" default=""/>
+  <xacro:arg name="arm2_rt_host" default=""/>
+  <xacro:arg name="arm2_mode" default=""/>
+  <xacro:arg name="arm2_model" default="m1013"/>
+  <xacro:arg name="arm2_update_rate" default=""/>
+
+  <xacro:property name="half_spacing" value="${float('$(arg arm_spacing)')/2.0}"/>
+
+  <xacro:include filename="$(find dsr_description2)/xacro/r100_m1013_dual.urdf.xacro"/>
+  <xacro:r100_m1013_dual
+    color="$(arg color)"
+    arm_prefix="$(arg arm_prefix)"
+    arm2_prefix="$(arg arm2_prefix)"
+    mount_xyz="0 -${half_spacing} 0"
+    mount_rpy="0 0 0"
+    arm2_mount_xyz="0 ${half_spacing} 0"
+    arm2_mount_rpy="0 0 0"
+    enable_ros2_control="$(arg enable_ros2_control)"
+    host="$(arg host)"
+    port="$(arg port)"
+    rt_host="$(arg rt_host)"
+    mode="$(arg mode)"
+    model="$(arg model)"
+    update_rate="$(arg update_rate)"
+    arm2_host="$(arg arm2_host)"
+    arm2_port="$(arg arm2_port)"
+    arm2_rt_host="$(arg arm2_rt_host)"
+    arm2_mode="$(arg arm2_mode)"
+    arm2_model="$(arg arm2_model)"
+    arm2_update_rate="$(arg arm2_update_rate)"
+  />
+</robot>

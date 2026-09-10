@@ -219,9 +219,10 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-.claude
+.claude*
 .codex
 .serena
+.swarm
 .codegraph
 .agents
 .codegraph
@@ -239,4 +240,9 @@ build/
 log/
 install/
 
-src/API
+# Ruflo local secrets and runtime data
+.env.local
+.env.*.local
+.claude-flow/data/
+.claude-flow/logs/
+.claude-flow/sessions/

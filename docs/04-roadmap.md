@@ -4,6 +4,8 @@
 
 **기간 가정:** 2026-09-02 착수, **2026-09-11 완성 목표** (10일). 이 전제로 아래 일정을 짰다.
 
+> **문서 성격:** 아래 Day 1~10 본문은 최초 계획을 보존한 이력 문서다. 본문에 남아 있는 `MotionDemo`, `controller_demo_services.py`, `place_slots.json`, 직접 DSR 제어 전제는 현재 브랜치의 파일 구조가 아니다. 현재 구조와 실행 상태는 [01 아키텍처](01-architecture.md), [03 시스템 플로우](03-system-flow.md), [06 실행 가이드](06-controller-guide.md)를 우선한다.
+
 ---
 
 ## 1. 일정표
@@ -132,7 +134,19 @@ OBSERVE에서 좌표를 요청하고 handle_execute()에서 Component 하나를 
 
 ---
 
-## 5. 위험 요소
+## 5. 현재 브랜치 상태 (2026-09-10)
+
+- `MotionDemo` 대신 MoveIt2·OctoMap·RG2를 사용하는 실제 `Motion`이 Controller의 `main()`에 연결되어 있다.
+- FoundationPose + GraspGenX 후보를 외부 NPZ/NPY 파일에서 읽어 시험하는 `grasp_pick_test.py`가 추가되었다.
+- GraspGenX 경로는 독립 시험 단계이며 Controller 상태머신, `GetComponentPose`, 음성/DB E2E에는 연결되지 않았다.
+- Controller는 삭제된 `set_octomap_exclusion_component()`를 호출하고 현재 `move_to_inspection_pose()`에 없는 `clear_before` 인자를 전달한다. 이 두 호환성 문제를 정리하기 전에는 Controller E2E를 실행 완료로 판정하지 않는다.
+- 기존 OctoMap 단위 시험은 현재 제거된 설정과 필터 함수를 기대하므로 최신 구현 기준으로 다시 작성해야 한다.
+
+이 절은 코드 변경 제안의 우선순위만 기록한다. 실제 코드 수정은 별도 작업으로 진행한다.
+
+---
+
+## 6. 위험 요소
 
 | 위험 | 영향 | 완화 |
 | --- | --- | --- |

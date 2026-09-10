@@ -1,0 +1,151 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="m1013_mobile">
+
+  <xacro:arg name="mode"           default="virtual"/>
+  <xacro:arg name="color"          default="white"/>
+  <xacro:arg name="namespace"      default=""/>
+
+  <!-- gripper control argument -->
+  <xacro:arg name="gripper"              default="none"/>         <!-- none | robotiq_2f85 -->
+  <xacro:arg name="gripper_prefix"       default=""/>             <!-- ex) dsr01_ -->
+  <xacro:arg name="gripper_parent_link"  default="link_6"/>
+
+  <!-- mobile base mounting position (height offset from base_link to robot mount point) -->
+  <xacro:arg name="robot_mount_height" default="0.35"/>  <!-- Height of robot mounting plate -->
+
+  <xacro:arg name="use_gazebo" default="false"/>
+  <xacro:property name="gz" value="$(arg use_gazebo)"/>
+
+  <xacro:property name="cr" value="$(arg color)"/>
+  <xacro:property name="gr" value="$(arg gripper)"/>
+  <xacro:property name="mount_height" value="$(arg robot_mount_height)"/>
+
+  <!-- Include mobile base -->
+  <xacro:include filename="$(find dsr_description2)/config/macro.boxer_mobile.xacro"/>
+  <xacro:boxer_mobile_base prefix=""/>
+
+  <!-- Include M1013 robot macro -->
+  <xacro:if value="${cr == 'white'}">
+    <xacro:include filename="$(find dsr_description2)/xacro/macro.m1013.white.xacro"/>
+  </xacro:if>
+  <xacro:if value="${cr == 'blue'}">
+    <xacro:include filename="$(find dsr_description2)/xacro/macro.m1013.blue.xacro"/>
+  </xacro:if>
+
+  <!-- Create robot mount link on top of mobile base -->
+  <link name="robot_mount">
+    <inertial>
+      <mass value="5.0" />
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <inertia ixx="0.1" ixy="0" ixz="0" iyy="0.1" iyz="0" izz="0.1" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <cylinder radius="0.15" length="0.02" />
+      </geometry>
+      <material name="grey"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <cylinder radius="0.15" length="0.02" />
+      </geometry>
+    </collision>
+  </link>
+
+  <gazebo reference="robot_mount">
+    <material>Gazebo/Grey</material>
+  </gazebo>
+
+  <!-- Joint to mount robot on mobile base -->
+  <joint name="robot_mount_joint" type="fixed">
+    <parent link="mobile_base_link"/>
+    <child link="robot_mount"/>
+    <origin xyz="0 0 ${mount_height}" rpy="0 0 0"/>
+  </joint>
+
+  <!-- Instantiate M1013 robot with custom namespace -->
+  <!-- Note: The m1013 macro creates its own base_link, so we need to connect it to robot_mount -->
+  <xacro:m1013 namespace="$(arg namespace)"/>
+
+  <!-- Override the world joint from m1013.urdf.xacro -->
+  <!-- We'll connect the robot's base_link to our robot_mount instead -->
+  <link name="world"/>
+  <joint name="world_to_mobile_base" type="fixed">
+    <origin xyz="0 0 0.08" rpy="0 0 0"/>
+    <parent link="world"/>
+    <child  link="mobile_base_footprint"/>
+  </joint>
+
+  <!-- Connect robot base_link to robot_mount -->
+  <joint name="mount_to_robot" type="fixed">
+    <origin xyz="0 0 0.01" rpy="0 0 0"/>  <!-- 0.01m above mount plate -->
+    <parent link="robot_mount"/>
+    <child  link="base_link"/>  <!-- This is the robot's base_link from m1013 macro -->
+  </joint>
+
+  <!-- ROS2 Control for Robot Arm -->
+  <xacro:if value="${gz}">
+    <xacro:include filename="$(find dsr_description2)/ros2_control/m1013.gz_ros2_control.xacro"/>
+    <xacro:m1013_gz_ros2_control namespace="$(arg namespace)"/>
+  </xacro:if>
+  <xacro:unless value="${gz}">
+    <xacro:include filename="$(find dsr_description2)/ros2_control/m1013.ros2_control.xacro"/>
+    <xacro:m1013_ros2_control name="m1013"/>
+  </xacro:unless>
+
+  <!-- ROS2 Control for Mobile Base -->
+  <ros2_control name="mobile_base_system" type="system">
+    <hardware>
+      <plugin>mock_components/GenericSystem</plugin>
+      <param name="calculate_dynamics">false</param>
+    </hardware>
+
+    <!-- Left wheel -->
+    <joint name="left_wheel_joint">
+      <command_interface name="velocity">
+        <param name="min">-5.0</param>
+        <param name="max">5.0</param>
+      </command_interface>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+    </joint>
+
+    <!-- Right wheel -->
+    <joint name="right_wheel_joint">
+      <command_interface name="velocity">
+        <param name="min">-5.0</param>
+        <param name="max">5.0</param>
+      </command_interface>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+    </joint>
+  </ros2_control>
+
+  <!-- Gripper (optional) -->
+  <xacro:if value="${gr == 'robotiq_2f85'}">
+
+    <xacro:include filename="$(find dsr_description2)/gripper/robotiq.xacro"/>
+    <xacro:robotiq_85
+      parent="$(arg gripper_parent_link)"
+      prefix="$(arg gripper_prefix)"/>
+
+    <xacro:include filename="$(find dsr_description2)/gripper/robotiq.ros2_control.xacro"/>
+      <xacro:robotiq_gripper_system
+      mode="$(arg mode)"
+      joint_name="$(arg gripper_prefix)robotiq_85_left_knuckle_joint"
+      system_name="$(arg gripper_prefix)robotiq_gripper_system"
+      pos_min="0.0"
+      pos_max="0.8"
+      init_pos="0.0"
+      speed_mult="1.0"
+      force_mult="0.5"
+      max_speed="0.150"
+      max_force="235.0"
+      mock_sensor_commands="true" />
+
+  </xacro:if>
+
+</robot>
+
