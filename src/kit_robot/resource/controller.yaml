@@ -28,11 +28,6 @@
     max_age_sec: 3.0
     observation_settle_sec: 4.0
 
-    # 홈 자세에서 작업당 한 번만 도는 octomap 촬영 창. 이 창이 끝나면 지도를
-    # 확정해 이후 픽·플레이스·검사 전 구간이 그 지도만 쓴다(다시 안 찍는다).
-    # observation_settle_sec 이상이어야 한다.
-    home_octomap_scan_sec: 10.0
-
     # 검사 대기
     inspect_timeout_sec: 10.0
     inspection_settle_sec: 4.0
