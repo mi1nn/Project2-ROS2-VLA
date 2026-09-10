@@ -3334,10 +3334,10 @@ class Motion:
                 self.move_linear(pick_pose_up, vel=vel, acc=acc, avoid_collisions=False)
                 time.sleep(1.0)
 
-                gripper_status = self.rg.get_status()
-                grip_detected = bool(gripper_status[1])
+                gripper_width = self.rg.get_width()
+                self.logger.info(f"gripper_width = {gripper_width} mm")
 
-                if grip_detected:
+                if gripper_width > 13:
                     self.logger.info("Successfully gripped object")
                     return True
                 else:
