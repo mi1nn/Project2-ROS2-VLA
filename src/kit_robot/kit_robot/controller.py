@@ -26,6 +26,10 @@ from kit_robot.controller_model import (
 
 from kit_robot.motion import Motion
 
+# 컵라면만 FoundationPose -> GraspGenX -> Top5 MoveIt 경로를 사용한다.
+# 나머지 품목은 기존 /get_component_pose -> pick_component() 경로를 그대로 유지한다.
+CUP_GRASP_COMPONENT = "컵라면"
+
 class State(Enum):
     '''명령 수신부터 최종 보고까지 Controller의 일곱 실행 상태를 정의한다.'''
     IDLE = auto()
@@ -266,12 +270,17 @@ class Controller(Node):
         self.report_completed = False   # REPORT의 중복 처리 방지
         self.failure_stage = ""
 
-        # place(키팅 트레이) 위치 octomap은 작업당 한 번만 만든다. 이후 컴포넌트는
-        # 이 스냅샷을 그대로 재사용한다 — 매 EXECUTE마다 inspect 자세를 다시
-        # 왕복하지 않는다.
-        self.place_octomap_ready = False
-        # tray 도착 직후 게이트를 열어봐야 카메라 프레임이 아직 안 들어온 상태다.
-        # None이 아니면 "정착 대기 중" — 이 시각이 지나야 관찰 자세로 넘어간다.
+        # Static OctoMap belongs to Motion, so it survives IDLE -> next voice
+        # task transitions. Only the first task in this process performs the scan.
+        self.place_octomap_ready = bool(
+            self.motion is not None
+            and getattr(
+                self.motion,
+                "static_octomap_initialized",
+                False,
+            )
+        )
+        # Non-None only while the first 3-second scan window is active.
         self.place_octomap_settle_at = None
 
         # 현재 작업에서 발행한 index 집합. DB 저장 완료를 확인하는 장치는 아니다.
@@ -388,11 +397,11 @@ class Controller(Node):
         component = self.components[self.component_index]
         try:
             self.motion_started = True
-            # octomap 게이트가 열리기 *전에* 걸어야 한다 — 부분 삭제 API가
-            # 없어서, 게이트가 열리고 들어오는 첫 프레임부터 이 물체의 voxel이
-            # 박히기 시작하면 다시는 못 뺀다. 어차피 트레이 스캔 이후로는
-            # freeze_octomap()이 게이트를 잠가 두므로 실제로는 무해하다.
-            self.motion.set_octomap_exclusion_component(component.name)
+            # 현재 Motion 백엔드는 component-name 마스크가 아니라 실제 target
+            # 위치를 얻은 뒤 base-frame sphere exclusion을 건다.
+            # 따라서 관찰 진입 시점에는 exclusion을 미리 걸지 않는다.
+            # - 일반 품목: pick_component()에서 target_pose 기준 exclusion
+            # - 컵라면: pick_cup_graspgenx_live()에서 complete object PC 기준 exclusion
             self.motion.move_to_observation_pose()
         except Exception as error:
             self.task_fatal = True
@@ -431,16 +440,20 @@ class Controller(Node):
             self.request_deadline = None
 
             if not self.place_octomap_ready:
-                # 작업당 한 번: place 위치를 먼저 보고 와서 장애물 회피용
-                # octomap을 만든다. 여기서 바로 관찰 자세로 넘어가면 move_pose가
-                # 시작하자마자 게이트를 닫아버려 voxel이 하나도 안 쌓인다 — 아래
-                # entered=False 쪽에서 정착 시간만큼 기다렸다가 넘어간다.
+                # A previous voice task in the same process may already have
+                # initialized the static map.
+                if getattr(
+                    self.motion,
+                    "static_octomap_initialized",
+                    False,
+                ):
+                    self.place_octomap_ready = True
+                    self._enter_observation_pose()
+                    return
+
                 try:
                     self.motion_started = True
-                    # 이전 작업(특히 실패로 끝난 작업)의 octomap이 그대로 남아
-                    # 있으면 이 최초 이동 자체가 그 잔여 voxel에 막혀 계획이
-                    # 안 나온다 — 새 작업의 첫 이동이므로 지우고 움직인다.
-                    self.motion.move_to_inspection_pose(clear_before=True)
+                    self.motion.start_static_octomap_scan()
                 except Exception as error:
                     self.task_fatal = True
                     self.error_code = "initial_octomap_scan_failed"
@@ -448,12 +461,18 @@ class Controller(Node):
                     self.transition_to(
                         State.REPORT,
                         TransitionCategory.TASK_FATAL,
-                        f"관찰 자세 이동 실패: {self.error_code}, {self.detail}",
+                        (
+                            "초기 고정 OctoMap 스캔 시작 실패: "
+                            f"{self.error_code}, {self.detail}"
+                        ),
                     )
                     return
 
                 self.place_octomap_settle_at = (
-                    time.monotonic() + self.observation_settle
+                    time.monotonic()
+                    + float(
+                        self.motion.static_octomap_scan_sec
+                    )
                 )
                 return
 
@@ -463,16 +482,45 @@ class Controller(Node):
         if self.place_octomap_settle_at is not None:
             if time.monotonic() < self.place_octomap_settle_at:
                 return
+
+            try:
+                self.motion.finish_static_octomap_scan()
+            except Exception as error:
+                self.task_fatal = True
+                self.error_code = "initial_octomap_scan_failed"
+                self.detail = str(error)
+                self.transition_to(
+                    State.REPORT,
+                    TransitionCategory.TASK_FATAL,
+                    (
+                        "초기 고정 OctoMap 확정 실패: "
+                        f"{self.error_code}, {self.detail}"
+                    ),
+                )
+                return
+
             self.place_octomap_ready = True
             self.place_octomap_settle_at = None
-            # 키팅 트레이 스캔이 전부다. 여기서 잠그면 관찰·픽·플레이스·최종
-            # 검사까지 전 구간이 이 지도 하나만 보고 계획하고, 다른 자세에서는
-            # 다시 찍지 않는다.
-            self.motion.freeze_octomap()
+            self.get_logger().info(
+                "초기 고정 OctoMap 생성 완료: 이후 음성 작업에서도 재사용"
+            )
             self._enter_observation_pose()
             return
 
         if time.monotonic() < self.pose_ready_at:
+            return
+
+        # 컵라면은 기존 2D/Depth 중심좌표 서비스를 사용하지 않는다.
+        # 관찰 자세가 정착되면 EXECUTE에서 단 한 번의 live perception으로
+        # FoundationPose -> GraspGenX -> 30도 필터 -> Top5 planning을 수행한다.
+        component = self.components[self.component_index]
+        if component.name == CUP_GRASP_COMPONENT:
+            self.target_pose = None
+            self.transition_to(
+                State.EXECUTE,
+                TransitionCategory.NORMAL,
+                "컵라면 관찰 자세 정착 완료; live GraspGenX 실행 시작",
+            )
             return
 
         # 진행 중인 요청은 응답만 확인하여 같은 좌표 요청을 중복 전송하지 않는다.
@@ -528,10 +576,20 @@ class Controller(Node):
         stage = "PICK"
 
         try:
-            picked = self.motion.pick_component(
-                component.name,
-                self.target_pose,
-            )
+            if component.name == CUP_GRASP_COMPONENT:
+                self.get_logger().info(
+                    "컵라면 전용 PICK: FoundationPose -> GraspGenX -> "
+                    "base -Z 30도 필터 -> score Top5 MoveIt 검증"
+                )
+                picked = self.motion.pick_cup_graspgenx_live(
+                    component.name
+                )
+            else:
+                # 기존 품목은 기존 좌표/모션 경로를 그대로 사용한다.
+                picked = self.motion.pick_component(
+                    component.name,
+                    self.target_pose,
+                )
 
             if not picked:
                 self.handle_grasp_failure()

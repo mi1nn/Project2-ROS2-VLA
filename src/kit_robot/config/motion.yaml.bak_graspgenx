@@ -1,0 +1,161 @@
+motion:
+  # MoveIt2 interface settings.
+  moveit:
+    planning_group: "manipulator"
+    base_frame: "base_link"
+    eef_link: "link_6"
+
+    joint_names:
+      - "joint_1"
+      - "joint_2"
+      - "joint_3"
+      - "joint_4"
+      - "joint_5"
+      - "joint_6"
+
+    move_group_action: "/dsr01/move_action"
+    execute_trajectory_action: "/dsr01/execute_trajectory"
+    cartesian_path_service: "/dsr01/compute_cartesian_path"
+    apply_planning_scene_service: "/dsr01/apply_planning_scene"
+
+    default_keepout_box:
+      enabled: true
+      id: "base_keepout_box"
+
+      min_cm: [-200.0, 40.0, -100.0]
+      max_cm: [200.0, 100.0, 600.0]
+
+      marker_topic: "/kit_robot/default_keepout_box_marker"
+
+    # Octomap 게이트. eye-in-hand 라 팔이 움직이는 동안 쌓으면 voxel 이 번져서,
+    # 카메라 포인트클라우드를 그대로 move_group 에 주지 않고 여기서 중계하며
+    # "관찰·검사 자세에 멈춰 있을 때만" 연다. 누적은 멈추지만 지도는 지우지 않고
+    # 다음 갱신까지 유지되므로, 픽·플레이스 전 구간에서 장애물 회피가 살아 있다.
+    # cloud_out 은 sensors_3d.yaml 의 point_cloud_topic 과 반드시 같아야 한다.
+    octomap:
+      enabled: true
+      cloud_in: "/camera/depth/color/points"
+      cloud_out: "/kit/octomap_cloud"
+      clear_service: "/dsr01/clear_octomap"
+      get_planning_scene_service: "/dsr01/get_planning_scene"
+
+      # RealSense 클라우드에는 물체 가장자리에서 튀는 "flying pixel"(전경도
+      # 배경도 아닌 허공의 점) 노이즈가 섞여 있다. 옥토맵은 부분 삭제가
+      # 없어서 단 한 프레임의 튄 점도 영구히 voxel 로 박힌다 — 관찰 자세에서
+      # 손을 넣으면 voxel 이 생겼다가 손을 빼도 1분 넘게 안 지워지는 증상이
+      # 바로 이거다. 옥토맵으로 보내기 전에 매 프레임 이 격자 안 이웃 점
+      # 개수로 이상치를 거른다(motion.py: _remove_outlier_points).
+      # voxel_size 를 키우면(느슨해지면) 더 많이 살아남고, min_neighbors 를
+      # 키우면 더 빡빡하게 걸러진다.
+      denoise_voxel_size_m: 0.01
+      denoise_min_neighbors: 4
+
+      # 그레이징 앵글(눕혀서 보는 각도)에서는 depth 가 계단처럼 찍힌다 —
+      # 한 계단 안은 점들이 서로 다 동의(밀집)하므로 위 디노이즈로는 안
+      # 걸린다. base_frame 기준으로 가장 낮은 floor_percentile 번째 높이를
+      # "바닥"으로 보고, 그로부터 band_m 이내인 점만 그 높이로 눌러 편다
+      # (motion.py: _flatten_floor_points). band_m 은 반드시 지금 집어야
+      # 하는 가장 낮은 물체(5cm대)보다 작게 잡을 것 — band_m 이 그보다
+      # 크면 그 물체까지 바닥으로 눌려서 장애물로 안 잡힌다.
+      flatten_floor_enabled: true
+      flatten_floor_band_m: 0.015
+      flatten_floor_percentile: 5.0
+
+      # YOLO 경계의 mixed-depth/flying-pixel과 물체 아래 바닥 패치를 함께
+      # 제외하는 확장 폭. 너무 키우면 실제 인접 장애물도 숨으므로 실측 여유만 쓴다.
+      exclusion_mask_padding_px: 15
+
+      # 집으려는 물체와 테이블도 octomap 에는 그냥 장애물이다. 그리퍼가 물체
+      # voxel 을 통과하지 못하면 파지 자체가 계획되지 않으므로, ACM 의
+      # "<octomap>" 항목에서 아래 링크만 충돌 허용으로 바꾼다.
+      # 상완·팔꿈치·본체(link_1~link_5)는 일부러 빼둔다 — 그쪽이 실제 회피다.
+      allowed_collision_links:
+        - "link_6"
+        - "tool0"
+        - "bracket_link"
+        - "rg2_base_link"
+        - "rg2_left_outer_knuckle"
+        - "rg2_left_inner_knuckle"
+        - "rg2_left_inner_finger"
+        - "rg2_right_outer_knuckle"
+        - "rg2_right_inner_knuckle"
+        - "rg2_right_inner_finger"
+
+    server_ready_timeout_sec: 15.0
+    motion_timeout_sec: 60.0
+    tf_timeout_sec: 2.0
+
+    planning_time_sec: 5.0
+    planning_attempts: 5
+    pipeline_id: ""
+    planner_id: ""
+
+    joint_tolerance_deg: 0.5
+
+    default_joint_velocity_scale: 0.15
+    default_joint_acceleration_scale: 0.15
+
+    cartesian_max_step_m: 0.005
+    cartesian_min_fraction: 0.999
+    cartesian_jump_threshold: 0.0
+    cartesian_prismatic_jump_threshold: 0.0
+    cartesian_revolute_jump_threshold: 0.0
+
+    cartesian_acc_reference_mm_s2: 1000.0
+
+  positions:
+    home:
+      type: "joint"
+      pos: [0.0, 0.0, 90.0, 0.0, 90.0, 0.0]
+
+      joint_vel: 30.0
+      joint_acc: 60.0
+
+      joint_velocity_scale: 0.15
+      joint_acceleration_scale: 0.15
+
+    observation_pose:
+      type: "joint"
+      pos: [0.0, 0.0, 60.0, 0.0, 120.0, 0.0]
+
+      joint_vel: 30.0
+      joint_acc: 60.0
+
+      joint_velocity_scale: 0.15
+      joint_acceleration_scale: 0.15
+
+    inspection_pose:
+      type: "cartesian"
+
+      # [x_mm, y_mm, z_mm, A_deg, B_deg, C_deg]
+      # intrinsic ZYZ Euler
+      pos: [-382.990, 45.070, 398.620, 13.30, -177.59, -78.66]
+
+      joint_velocity_scale: 0.15
+      joint_acceleration_scale: 0.15
+
+      position_tolerance_mm: 2.0
+      orientation_tolerance_deg: 2.0
+
+  place:
+    linear_vel: 60.0
+    linear_acc: 120.0
+
+    slots:
+      slot_1:
+        pos: [-397.42, 138.87, 230.0, 41.74, 179.48, -136.13]
+
+      slot_2:
+        pos: [-397.42, 3.44, 230.0, 39.02, 179.37, -138.95]
+
+      slot_3:
+        pos: [-397.42, -132.0, 230.0, 36.29, 179.26, -141.78]
+
+      slot_4:
+        pos: [-513.55, 138.87, 230.0, 39.02, 179.37, -138.95]
+
+      slot_5:
+        pos: [-513.55, 3.44, 230.0, 36.29, 179.26, -141.78]
+
+      slot_6:
+        pos: [-513.55, -132.0, 230.0, 33.57, 179.15, -144.6]

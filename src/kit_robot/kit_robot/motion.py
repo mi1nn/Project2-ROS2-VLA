@@ -5,13 +5,11 @@ import threading
 import time
 import warnings
 
-import cv2
 import numpy as np
 import rclpy
 import yaml
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import Pose
-from kit_interfaces.msg import DetectionArray
 from moveit_msgs.action import ExecuteTrajectory, MoveGroup
 from moveit_msgs.msg import (
     AllowedCollisionEntry,
@@ -23,6 +21,7 @@ from moveit_msgs.msg import (
     PlanningScene,
     PlanningSceneComponents,
     PositionConstraint,
+    RobotState,
 )
 from moveit_msgs.srv import (
     ApplyPlanningScene,
@@ -39,10 +38,11 @@ from rclpy.qos import (
     qos_profile_sensor_data,
 )
 from rclpy.time import Time
-from sensor_msgs.msg import CameraInfo, PointCloud2
+from sensor_msgs.msg import PointCloud2
 from shape_msgs.msg import SolidPrimitive
-from std_srvs.srv import Empty
+from std_srvs.srv import Empty, Trigger
 from visualization_msgs.msg import Marker
+from scipy.spatial import cKDTree
 from scipy.spatial.transform import Rotation
 from tf2_ros import Buffer, TransformListener
 
@@ -79,129 +79,29 @@ def merge_octomap_acm(entry_names, matrix, allowed_links):
     return names, matrix
 
 
-def _mask_cloud_polygon(
-    xyz, polygons_px, intrinsics, width, height, padding_px=0
-):
-    """Return a bool array: True for points to KEEP (outside the YOLO masks).
+def _mask_cloud_sphere(data, point_step, x_offset, center, radius_m):
+    """Return a bool array: True for points to KEEP (outside the sphere).
 
-    ``xyz`` is Nx3 in the camera optical frame (any linear unit — the
-    projection is a ratio, so meters vs mm doesn't matter). ``polygons_px`` is
-    a list of DetectedObject.masking_map, each a flat [x0, y0, x1, y1, ...]
-    pixel polygon in the color image ``intrinsics`` belongs to — one class can
-    have several instances in frame at once, and we exclude the union of all
-    of them (picking just one, e.g. "the last one in the message", risks
-    excluding the wrong instance and leaving the real pick target un-excluded).
-    Points that can't be projected (non-finite/non-positive depth, or landing
-    outside the image) are kept — better to occasionally leak one unmasked
-    point than to silently carve out unrelated geometry.
-
-    Pure buffer/geometry math so it can be checked without rclpy/sensor_msgs.
+    Pure buffer math so it can be checked without rclpy/sensor_msgs. NaN points
+    (already-invalid depth) are kept as-is (NaN comparisons are False, so the
+    `>` branch alone would drop them — the isnan OR-term keeps them instead).
     """
-    n_points = xyz.shape[0]
+    n_points = len(data) // point_step
     if n_points == 0:
         return np.zeros(0, dtype=bool)
 
-    mask_image = np.zeros((height, width), dtype=np.uint8)
-    contours = [
-        np.round(np.asarray(polygon_px, dtype=np.float32).reshape(-1, 2)).astype(
-            np.int32
-        )
-        for polygon_px in polygons_px
-    ]
-    cv2.fillPoly(mask_image, contours, 1)
-    if padding_px:
-        padding_px = int(padding_px)
-        if padding_px < 0:
-            raise ValueError("padding_px must be non-negative")
-        diameter = 2 * padding_px + 1
-        mask_image = cv2.dilate(
-            mask_image,
-            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (diameter, diameter)),
-        )
-
-    z = xyz[:, 2]
-    projectable = np.isfinite(z) & (z > 0.0)
-
-    u = np.zeros(n_points, dtype=np.int64)
-    v = np.zeros(n_points, dtype=np.int64)
-    u[projectable] = np.round(
-        xyz[projectable, 0] / z[projectable] * intrinsics["fx"] + intrinsics["ppx"]
-    ).astype(np.int64)
-    v[projectable] = np.round(
-        xyz[projectable, 1] / z[projectable] * intrinsics["fy"] + intrinsics["ppy"]
-    ).astype(np.int64)
-
-    in_bounds = projectable & (u >= 0) & (u < width) & (v >= 0) & (v < height)
-    excluded = np.zeros(n_points, dtype=bool)
-    excluded[in_bounds] = mask_image[v[in_bounds], u[in_bounds]].astype(bool)
-    return ~excluded
-
-
-def _remove_outlier_points(xyz, voxel_size=0.01, min_neighbors=4):
-    """Return a bool keep-mask that drops sparse "flying pixel" noise.
-
-    A real surface (table, tray, object) returns a locally dense cluster of
-    points; a depth-sensor flying pixel — the classic stray return at an
-    object edge, floating between foreground and background — sits alone in
-    its neighborhood. Bucket points into a coarse voxel grid and keep only
-    points whose bucket holds at least ``min_neighbors`` points total
-    (including itself); this both flattens edge scatter onto whichever real
-    surface it's nearest to and drops isolated outliers outright. NaN/Inf/
-    non-positive-depth points are dropped unconditionally.
-
-    ``voxel_size`` should be a few mm to a cm or so — coarser than
-    ``octomap_resolution`` (this filters points, not the octree itself) but
-    fine enough not to merge separate objects into one bucket.
-
-    Pure buffer/geometry math so it can be checked without rclpy/sensor_msgs.
-    """
-    n_points = xyz.shape[0]
-    keep = np.zeros(n_points, dtype=bool)
-    if n_points == 0:
-        return keep
-
-    finite = np.all(np.isfinite(xyz), axis=1) & (xyz[:, 2] > 0.0)
-    if not np.any(finite):
-        return keep
-
-    # Hash each voxel to one int64 key instead of np.unique(..., axis=0),
-    # which is far slower at cloud-sized point counts. OFFSET keeps indices
-    # non-negative and comfortably covers D435's few-meter range at any
-    # sane voxel_size.
-    OFFSET = 1 << 16
-    idx = np.floor(xyz[finite] / voxel_size).astype(np.int64) + OFFSET
-    keys = (idx[:, 0] * OFFSET + idx[:, 1]) * OFFSET + idx[:, 2]
-    _, inverse, counts = np.unique(keys, return_inverse=True, return_counts=True)
-    keep[finite] = counts[inverse] >= min_neighbors
-    return keep
-
-
-def _flatten_floor_points(xyz, band_m=0.015, floor_percentile=5.0):
-    """Snap near-floor height wobble flat onto one reference height.
-
-    ``xyz`` must already be in a frame where z is "up" (base_frame) — the
-    eye-in-hand camera frame tilts with the arm, so a flat floor is not a
-    constant-z plane there. Grazing-angle depth quantization draws the floor
-    as a staircase of locally-coherent "shelves" — each shelf is internally
-    dense, so ``_remove_outlier_points`` (which only drops isolated points)
-    doesn't touch it. This instead assumes the floor/tray is the dominant,
-    lowest surface in view: the ``floor_percentile``-th lowest finite z is
-    taken as the true floor height, and any point within ``band_m`` of it is
-    pulled exactly onto that height. Points farther above it (real objects,
-    tray walls) are left untouched, so ``band_m`` must stay smaller than the
-    shortest real object that still needs to register as an obstacle.
-
-    Pure numpy so it can be checked without rclpy.
-    """
-    out = xyz.copy()
-    z = out[:, 2]
-    finite = np.isfinite(z)
-    if not np.any(finite):
-        return out
-    floor_z = np.percentile(z[finite], floor_percentile)
-    near_floor = finite & (np.abs(z - floor_z) <= band_m)
-    out[near_floor, 2] = floor_z
-    return out
+    # ponytail: x,y,z 가 연속 float32 라고 가정한다 (RealSense 정렬 클라우드의
+    # 표준 레이아웃). 다른 레이아웃이면 여기서 조용히 틀린 값을 낸다.
+    xyz = np.ndarray(
+        (n_points, 3),
+        dtype=np.float32,
+        buffer=data,
+        strides=(point_step, 4),
+        offset=x_offset,
+    )
+    cx, cy, cz = center
+    dist_sq = (xyz[:, 0] - cx) ** 2 + (xyz[:, 1] - cy) ** 2 + (xyz[:, 2] - cz) ** 2
+    return np.isnan(dist_sq) | (dist_sq > radius_m * radius_m)
 
 
 class Motion:
@@ -234,6 +134,74 @@ class Motion:
         self.place_config = config["place"]
         self.place_slots = self.place_config["slots"]
         self.moveit_config = config.get("moveit", {})
+        # GraspGenX execution bridge.  This section is intentionally independent
+        # from the legacy [x,y,z,rx,ry,rz] target-pose picker so both paths can
+        # coexist while the new 6-DoF grasp pipeline is being validated.
+        self.graspgenx_config = config.get("graspgenx", {})
+
+        # --------------------------------------------------------------
+        # Live cup-ramen GraspGenX path
+        # --------------------------------------------------------------
+        # Defaults match the standalone path that was validated on the real M0609.
+        # A future YAML section named "graspgenx_live" may override these without
+        # changing code, but no YAML change is required for the defaults below.
+        live_gg = config.get("graspgenx_live", {})
+        self.cup_grasp_component = str(
+            live_gg.get("component_name", "컵라면")
+        )
+        self.cup_grasp_service = str(
+            live_gg.get("service", "/cup_pick/perception")
+        )
+        self.cup_grasp_snapshot = os.path.expanduser(
+            str(live_gg.get(
+                "snapshot",
+                "/tmp/graspgenx_live/latest.npz",
+            ))
+        )
+        self.cup_grasp_top_k = int(
+            live_gg.get("top_k", 5)
+        )
+        self.cup_grasp_max_tilt_deg = float(
+            live_gg.get("max_tilt_deg", 30.0)
+        )
+        self.cup_grasp_pregrasp_distance_mm = float(
+            live_gg.get("pregrasp_distance_mm", 50.0)
+        )
+        self.cup_grasp_linear_vel_mm_s = float(
+            live_gg.get("linear_vel_mm_s", 50.0)
+        )
+        self.cup_grasp_linear_acc_mm_s2 = float(
+            live_gg.get("linear_acc_mm_s2", 100.0)
+        )
+        self.cup_grasp_perception_timeout_sec = float(
+            live_gg.get("perception_timeout_sec", 180.0)
+        )
+        self.cup_grasp_snapshot_timeout_sec = float(
+            live_gg.get("snapshot_timeout_sec", 3.0)
+        )
+
+        if self.cup_grasp_top_k < 1:
+            raise ValueError("graspgenx_live.top_k must be >= 1")
+        if not 0.0 < self.cup_grasp_max_tilt_deg <= 90.0:
+            raise ValueError(
+                "graspgenx_live.max_tilt_deg must be in (0, 90]"
+            )
+        if self.cup_grasp_pregrasp_distance_mm <= 0.0:
+            raise ValueError(
+                "graspgenx_live.pregrasp_distance_mm must be > 0"
+            )
+
+        # Exact frame correction used by the successful standalone test:
+        # T_grasp_tool0
+        self.cup_grasp_T_grasp_tool0 = np.array(
+            [
+                [0.0, 0.0, -1.0,  0.000],
+                [0.0, 1.0,  0.0,  0.000],
+                [1.0, 0.0,  0.0, -0.004],
+                [0.0, 0.0,  0.0,  1.000],
+            ],
+            dtype=np.float64,
+        )
 
         grasp_params_path = os.path.join(
             get_package_share_directory("kit_robot"),
@@ -248,6 +216,103 @@ class Motion:
         self.group_name = self.moveit_config.get("planning_group", "manipulator")
         self.base_frame = self.moveit_config.get("base_frame", "base_link")
         self.eef_link = self.moveit_config.get("eef_link", "tool0")
+
+        # --------------------------------------------------------------
+        # GraspGenX frame / file configuration
+        # --------------------------------------------------------------
+        gg = self.graspgenx_config
+        self.graspgenx_candidate_file = os.path.expanduser(str(
+            gg.get(
+                "candidate_file",
+                "/home/rokey/FoundationPose/grasp_bridge/00/obj_0_table_safe_grasps.npz",
+            )
+        ))
+        self.graspgenx_complete_pc_file = os.path.expanduser(str(
+            gg.get(
+                "complete_object_pc",
+                "/home/rokey/FoundationPose/grasp_bridge/00/complete_object_pc.npy",
+            )
+        ))
+        self.graspgenx_tool_frame = str(gg.get("tool_frame", "tool0"))
+        self.graspgenx_pregrasp_distance_mm = float(
+            gg.get("pregrasp_distance_mm", 100.0)
+        )
+        self.graspgenx_pregrasp_mode = str(
+            gg.get("pregrasp_mode", "tool0_z")
+        ).strip().lower()
+        if self.graspgenx_pregrasp_mode not in {"tool0_z", "grasp_z"}:
+            raise ValueError(
+                "graspgenx.pregrasp_mode must be 'tool0_z' or 'grasp_z'"
+            )
+        self.graspgenx_max_candidates = int(gg.get("max_candidates", 10))
+        if self.graspgenx_max_candidates < 1:
+            raise ValueError("graspgenx.max_candidates must be >= 1")
+        self.graspgenx_exclusion_margin_mm = float(
+            gg.get("object_exclusion_margin_mm", 25.0)
+        )
+        self.graspgenx_min_exclusion_radius_mm = float(
+            gg.get("min_exclusion_radius_mm", 35.0)
+        )
+        self.graspgenx_max_exclusion_radius_mm = float(
+            gg.get("max_exclusion_radius_mm", 180.0)
+        )
+        self.graspgenx_execution_enabled = bool(
+            gg.get("execution_enabled", False)
+        )
+
+        camera_cfg = gg.get("camera_extrinsics", {})
+        self.graspgenx_camera_source = str(
+            camera_cfg.get("source", "handeye")
+        ).strip().lower()
+        if self.graspgenx_camera_source not in {"handeye", "tf"}:
+            raise ValueError(
+                "graspgenx.camera_extrinsics.source must be 'handeye' or 'tf'"
+            )
+        self.graspgenx_camera_frame = str(
+            camera_cfg.get("camera_frame", "camera_color_optical_frame")
+        )
+        self.graspgenx_handeye_parent_frame = str(
+            camera_cfg.get("handeye_parent_frame", "tool0")
+        )
+        self.graspgenx_camera_extrinsics_validated = bool(
+            camera_cfg.get("validated", False)
+        )
+        handeye_file = str(camera_cfg.get("handeye_file", "")).strip()
+        if handeye_file:
+            self.graspgenx_handeye_file = os.path.expanduser(handeye_file)
+        else:
+            self.graspgenx_handeye_file = os.path.join(
+                get_package_share_directory("kit_robot"),
+                "resource",
+                "T_gripper2camera.npy",
+            )
+        self.graspgenx_handeye_translation_unit = str(
+            camera_cfg.get("translation_unit", "mm")
+        ).strip().lower()
+        if self.graspgenx_handeye_translation_unit not in {"mm", "m"}:
+            raise ValueError(
+                "graspgenx.camera_extrinsics.translation_unit must be 'mm' or 'm'"
+            )
+
+        tool_cfg = gg.get("grasp_to_tool", {})
+        self.graspgenx_grasp_to_tool_validated = bool(
+            tool_cfg.get("validated", False)
+        )
+        matrix = np.asarray(
+            tool_cfg.get(
+                "matrix",
+                [
+                    1.0, 0.0, 0.0, 0.0,
+                    0.0, 1.0, 0.0, 0.0,
+                    0.0, 0.0, 1.0, 0.0,
+                    0.0, 0.0, 0.0, 1.0,
+                ],
+            ),
+            dtype=np.float64,
+        )
+        if matrix.size != 16:
+            raise ValueError("graspgenx.grasp_to_tool.matrix must contain 16 numbers")
+        self.graspgenx_T_grasp_tool = matrix.reshape(4, 4)
         self.joint_names = list(
             self.moveit_config.get(
                 "joint_names",
@@ -308,30 +373,38 @@ class Motion:
                 "get_planning_scene_service", "/dsr01/get_planning_scene"
             )
         )
-        # 옥토맵으로 들어가기 전 클라우드 디노이즈 파라미터. _remove_outlier_points 참고.
-        self.octomap_denoise_voxel_m = float(
-            self.octomap_config.get("denoise_voxel_size_m", 0.01)
+
+        # --------------------------------------------------------------
+        # One-time static OctoMap policy
+        # --------------------------------------------------------------
+        # First task only:
+        #   inspection_pose -> scan 3 sec -> filter -> freeze.
+        # Later voice tasks reuse exactly the same occupancy tree.
+        self.static_octomap_scan_sec = float(
+            self.octomap_config.get("static_scan_sec", 3.0)
         )
-        self.octomap_denoise_min_neighbors = int(
-            self.octomap_config.get("denoise_min_neighbors", 4)
+        self.static_octomap_voxel_size_m = float(
+            self.octomap_config.get("static_voxel_size_m", 0.01)
         )
-        # 그레이징 앵글 계단 노이즈 펴기. _flatten_floor_points 참고 — band_m
-        # 은 실제로 장애물로 봐야 할 가장 낮은 물체보다 작아야 한다(지금
-        # 5cm 짜리 물체도 집어야 하므로 그보다 한참 작게 잡는다).
-        self.octomap_flatten_floor_enabled = bool(
-            self.octomap_config.get("flatten_floor_enabled", True)
+        self.static_octomap_min_depth_m = float(
+            self.octomap_config.get("static_min_depth_m", 0.28)
         )
-        self.octomap_flatten_band_m = float(
-            self.octomap_config.get("flatten_floor_band_m", 0.015)
+        # 3x3x3 neighborhood = 27 possible occupied voxels.
+        # Count includes the center voxel itself.
+        self.static_octomap_neighbor_min_count = int(
+            self.octomap_config.get("static_neighbor_min_count", 4)
         )
-        self.octomap_flatten_percentile = float(
-            self.octomap_config.get("flatten_floor_percentile", 5.0)
-        )
-        self.octomap_exclusion_mask_padding_px = int(
-            self.octomap_config.get("exclusion_mask_padding_px", 15)
-        )
-        if self.octomap_exclusion_mask_padding_px < 0:
-            raise ValueError("octomap.exclusion_mask_padding_px must be >= 0")
+
+        if self.static_octomap_scan_sec <= 0.0:
+            raise ValueError("octomap.static_scan_sec must be > 0")
+        if self.static_octomap_voxel_size_m <= 0.0:
+            raise ValueError("octomap.static_voxel_size_m must be > 0")
+        if self.static_octomap_min_depth_m < 0.0:
+            raise ValueError("octomap.static_min_depth_m must be >= 0")
+        if not 1 <= self.static_octomap_neighbor_min_count <= 27:
+            raise ValueError(
+                "octomap.static_neighbor_min_count must be in [1, 27]"
+            )
         # Links allowed to collide with octomap voxels: the gripper and what is
         # bolted to it. The target object and the table are voxels too, so
         # without this no grasp is ever plannable. Upper arm links stay out.
@@ -343,10 +416,12 @@ class Motion:
             )
         ]
         # 집을 물체 자체가 옥토맵에 박혀도, 위 ACM 면제는 그리퍼 링크까지만
-        # 풀어준다 — 손목/팔뚝 접근 경로는 여전히 막힌다. 부분 삭제 API가
-        # 없어서 한 번 voxel 로 박히면 못 빼므로, clear 대신 애초에 그 물체의
-        # YOLO 마스크에 해당하는 depth 포인트를 옥토맵으로 보내기 전에
-        # 걸러낸다 (_filter_octomap_cloud / set_octomap_exclusion_component).
+        # 풀어준다 — 손목/팔뚝 접근 경로는 여전히 막힌다. pick_component 가
+        # 물체 위치를 파낸 뒤(clear_octomap), place_component 가 트레이 지도를
+        # 복원한 뒤(move_to_inspection_pose) 각각 다시 짧게 스캔하는 정착 시간.
+        self.octomap_rescan_settle_sec = float(
+            self.octomap_config.get("rescan_settle_sec", 1.0)
+        )
 
         self.server_timeout = float(
             self.moveit_config.get("server_ready_timeout_sec", 15.0)
@@ -420,6 +495,13 @@ class Motion:
         self._cartesian_client = self._moveit_node.create_client(
             GetCartesianPath, self.cartesian_service_name
         )
+
+        # Do NOT require this service at Motion startup.  Other components must
+        # continue to work even when the cup-only perception pipeline is offline.
+        self._cup_perception_client = self._moveit_node.create_client(
+            Trigger, self.cup_grasp_service
+        )
+
         self._apply_planning_scene_client = self._moveit_node.create_client(
             ApplyPlanningScene, self.apply_planning_scene_service_name
         )
@@ -431,28 +513,24 @@ class Motion:
             Marker, self.keepout_marker_topic, marker_qos
         )
 
-        # Open by default so a run that never reaches the observation pose (or a
-        # bringup without Controller) still shows a map in RViz.
-        self._octomap_mapping = self.octomap_enabled
-        # True 이면 지도가 "확정"됐다는 뜻: 게이트는 다시 열리지 않고
-        # clear_octomap() 도 먹지 않는다. Controller 가 작업당 딱 두 번
-        # (키팅 트레이 1회 + 홈 자세 장시간 1회) 쌓고 나서 freeze_octomap()
-        # 으로 잠근다 — 이후 픽·플레이스·검사 전 구간이 이 지도 하나만 본다.
-        # 새 작업 시작 시 move_to_inspection_pose(clear_before=True) 가 푼다.
-        self._octomap_frozen = False
-        # 지금 옥토맵에서 빼고 있는 컴포넌트 이름(클래스명) 또는 None.
-        # Controller 가 move_to_observation_pose() 호출 *전에* 걸어야 한다 —
-        # 부분 삭제 API가 없어서, 게이트가 열리고 들어오는 첫 프레임부터 이미
-        # 이 물체의 voxel 이 박히기 시작한다.
-        self._octomap_exclusion_component = None
-        self._octomap_exclusion_min_stamp_ns = None
-        # class_name -> DetectedObject.masking_map (최신 1개만 유지).
-        self._latest_detection_masks = {}
-        self._latest_detection_stamp_ns = None
-        # {"fx", "fy", "ppx", "ppy"} 또는 None (아직 camera_info 못 받음).
-        self._camera_intrinsics = None
-        self._camera_width = None
-        self._camera_height = None
+        # Static mode starts with the relay CLOSED.  No startup-pose cloud is
+        # allowed into MoveIt before the explicit inspection-pose scan.
+        self._octomap_mapping = False
+        self.static_octomap_initialized = False
+        self._static_octomap_frozen = False
+        self._static_octomap_scan_active = False
+
+        # Per-scan diagnostics, reset when the one-time scan starts.
+        self._static_octomap_frames = 0
+        self._static_octomap_input_points = 0
+        self._static_octomap_invalid_or_near_dropped = 0
+        self._static_octomap_voxels_before_density = 0
+        self._static_octomap_density_dropped = 0
+        self._static_octomap_output_voxels = 0
+
+        # Kept for API compatibility.  A frozen static map accepts no future
+        # cloud, so later exclusions cannot mutate it.
+        self._octomap_exclusion = None
         self._clear_octomap_client = None
         self._get_planning_scene_client = None
         if self.octomap_enabled:
@@ -473,25 +551,6 @@ class Motion:
                 PointCloud2,
                 self.octomap_cloud_in,
                 self._octomap_cloud_callback,
-                qos_profile_sensor_data,
-            )
-            # pick 위치에서 집을 물체의 YOLO 마스크를 옥토맵에서 걸러내려면
-            # 픽셀 폴리곤(masking_map)과 그걸 찍은 카메라의 intrinsics 가
-            # 둘 다 필요하다 — kit_vision object_detection.py 와 독립적으로,
-            # 여기서 바로 구독한다.
-            detection_qos = QoSProfile(
-                reliability=ReliabilityPolicy.BEST_EFFORT, depth=1
-            )
-            self._moveit_node.create_subscription(
-                DetectionArray,
-                "/detection/objects",
-                self._detection_callback,
-                detection_qos,
-            )
-            self._moveit_node.create_subscription(
-                CameraInfo,
-                "/camera/color/camera_info",
-                self._camera_info_callback,
                 qos_profile_sensor_data,
             )
 
@@ -742,241 +801,347 @@ class Motion:
     # ------------------------------------------------------------------
 
     def _octomap_cloud_callback(self, msg):
+        """Relay only filtered clouds during the one-time static scan."""
         if not self._octomap_mapping:
             return
-        if (
-            self._octomap_exclusion_component is not None
-            and not self._has_fresh_exclusion_mask()
-        ):
-            self.logger.warn(
-                "옥토맵 중계 보류: 파지 대상의 새 YOLO 마스크가 아직 없음 "
-                f"(component={self._octomap_exclusion_component})",
-                throttle_duration_sec=2.0,
-            )
+
+        filtered = self._filter_static_octomap_cloud(msg)
+        if filtered is None or filtered.width == 0:
             return
-        if (
-            self._octomap_exclusion_component is not None
-            and self._camera_intrinsics is None
-        ):
-            self.logger.warn(
-                "옥토맵 중계 보류: 파지 대상 마스크를 투영할 camera_info가 없음",
-                throttle_duration_sec=2.0,
-            )
-            return
-        self._octomap_cloud_pub.publish(self._filter_octomap_cloud(msg))
 
-    def _detection_callback(self, msg):
-        # class_name 하나에 인스턴스가 여러 개일 수 있다(같은 품목 2개 이상).
-        # 마지막 걸로 덮어쓰면 실제로 집으려는 인스턴스가 아닌 다른 인스턴스의
-        # 마스크만 남아 정작 걸러야 할 물체는 그대로 새는 사고가 난다 — 이번
-        # 메시지에 잡힌 같은 클래스는 전부 모아 합집합으로 제외한다.
-        masks = {}
-        for obj in msg.objects:
-            masks.setdefault(obj.class_name, []).append(list(obj.masking_map))
-        self._latest_detection_masks = masks
-        stamp = msg.header.stamp
-        self._latest_detection_stamp_ns = stamp.sec * 1_000_000_000 + stamp.nanosec
+        self._octomap_cloud_pub.publish(filtered)
 
-    def _has_fresh_exclusion_mask(self):
-        component = self._octomap_exclusion_component
-        if component is None:
-            return True
-        if not self._latest_detection_masks.get(component):
-            return False
-        minimum = getattr(self, "_octomap_exclusion_min_stamp_ns", None)
-        stamp = getattr(self, "_latest_detection_stamp_ns", None)
-        return minimum is None or (stamp is not None and stamp >= minimum)
+    @staticmethod
+    def _cloud_from_selected_rows(msg, row_indices):
+        """Create an unorganized cloud from selected raw PointCloud2 rows."""
+        if msg.point_step <= 0:
+            return None
 
-    def _camera_info_callback(self, msg):
-        self._camera_intrinsics = {
-            "fx": float(msg.k[0]),
-            "fy": float(msg.k[4]),
-            "ppx": float(msg.k[2]),
-            "ppy": float(msg.k[5]),
+        n_points = len(msg.data) // msg.point_step
+        if n_points == 0:
+            return None
+
+        raw = np.frombuffer(
+            msg.data,
+            dtype=np.uint8,
+        ).reshape(n_points, msg.point_step)
+
+        row_indices = np.asarray(
+            row_indices,
+            dtype=np.int64,
+        )
+        row_indices = row_indices[
+            (row_indices >= 0)
+            & (row_indices < n_points)
+        ]
+
+        filtered = PointCloud2()
+        filtered.header = msg.header
+        filtered.height = 1
+        filtered.width = int(len(row_indices))
+        filtered.fields = msg.fields
+        filtered.is_bigendian = msg.is_bigendian
+        filtered.point_step = msg.point_step
+        filtered.row_step = (
+            msg.point_step * filtered.width
+        )
+        filtered.is_dense = True
+        filtered.data = raw[row_indices].tobytes()
+        return filtered
+
+    def _filter_static_octomap_cloud(self, msg):
+        """Prepare a stable cloud for the fixed OctoMap.
+
+        Pipeline:
+          raw D435i PointCloud2
+            -> finite XYZ only
+            -> reject optical depth < 0.28 m
+            -> transform points to base_link
+            -> 1 cm voxel downsample
+            -> 3x3x3 occupied-neighborhood filter
+            -> publish one representative point per surviving voxel
+
+        The 3x3x3 test uses a Chebyshev distance of one voxel.  With the default
+        threshold 4/27, isolated depth speckles disappear while one-voxel-thick
+        box walls and corners normally remain connected.
+
+        Output points are kept in the original camera frame. MoveIt's updater
+        performs its normal TF and ray insertion after receiving this message.
+        """
+        if msg.point_step <= 0:
+            return None
+
+        offsets = {
+            field.name: int(field.offset)
+            for field in msg.fields
         }
-        self._camera_width = msg.width
-        self._camera_height = msg.height
+        if not {"x", "y", "z"} <= offsets.keys():
+            self.logger.warning(
+                "[STATIC OCTOMAP] PointCloud2 has no XYZ fields; frame dropped"
+            )
+            return None
 
-    def set_octomap_exclusion_component(self, component_name):
-        """Start dropping `component_name`'s YOLO mask from every relayed
-        cloud frame, from now on.
+        if max(offsets["x"], offsets["y"], offsets["z"]) + 4 > msg.point_step:
+            self.logger.warning(
+                "[STATIC OCTOMAP] invalid XYZ field offsets; frame dropped"
+            )
+            return None
 
-        Call this *before* move_to_observation_pose(), not after — there is
-        no partial-octree erase, so any frame relayed before this runs can
-        still bake the object's voxels in permanently.
-        """
-        if not self.octomap_enabled:
-            return
-        self._octomap_exclusion_component = component_name
-        self._octomap_exclusion_min_stamp_ns = self._moveit_node.get_clock().now().nanoseconds
+        n_points = len(msg.data) // msg.point_step
+        if n_points == 0:
+            return None
 
-    def clear_octomap_exclusion(self):
-        self._octomap_exclusion_component = None
-        self._octomap_exclusion_min_stamp_ns = None
+        dtype = (
+            np.dtype(">f4")
+            if msg.is_bigendian
+            else np.dtype("<f4")
+        )
 
-    def _flatten_floor_in_sensor_frame(self, xyz, header):
-        """Round-trip ``xyz`` through base_frame to flatten floor wobble,
-        then hand it back in the cloud's own (sensor) frame.
+        try:
+            x = np.ndarray(
+                (n_points,),
+                dtype=dtype,
+                buffer=msg.data,
+                offset=offsets["x"],
+                strides=(msg.point_step,),
+            )
+            y = np.ndarray(
+                (n_points,),
+                dtype=dtype,
+                buffer=msg.data,
+                offset=offsets["y"],
+                strides=(msg.point_step,),
+            )
+            z = np.ndarray(
+                (n_points,),
+                dtype=dtype,
+                buffer=msg.data,
+                offset=offsets["z"],
+                strides=(msg.point_step,),
+            )
+        except Exception as error:
+            self.logger.warning(
+                f"[STATIC OCTOMAP] XYZ extraction failed: {error}"
+            )
+            return None
 
-        ``_flatten_floor_points`` needs z to mean "up", which only holds in
-        base_frame — the eye-in-hand camera frame tilts with every joint
-        move. TF lookup failure just skips flattening for this one frame
-        (denoise/exclusion below still run) rather than dropping the cloud.
-        """
+        xyz_camera = np.column_stack(
+            (x, y, z)
+        ).astype(np.float64, copy=False)
+
+        finite = np.all(
+            np.isfinite(xyz_camera),
+            axis=1,
+        )
+
+        # D435i optical frame: +Z is the measured depth away from the camera.
+        # Every point closer than 28 cm is discarded unconditionally.
+        usable = (
+            finite
+            & (xyz_camera[:, 2] > self.static_octomap_min_depth_m)
+        )
+        source_indices = np.flatnonzero(
+            usable
+        )
+        if len(source_indices) == 0:
+            self._static_octomap_frames += 1
+            self._static_octomap_input_points += int(n_points)
+            self._static_octomap_invalid_or_near_dropped += int(n_points)
+            return None
+
+        xyz_camera = xyz_camera[
+            source_indices
+        ]
+
+        # Base-aligned voxel grid: stable even though the camera is eye-in-hand.
         try:
             transform = self._tf_buffer.lookup_transform(
                 self.base_frame,
-                header.frame_id,
+                msg.header.frame_id,
                 Time(),
-                timeout=Duration(seconds=self.tf_timeout),
+                timeout=Duration(
+                    seconds=self.tf_timeout
+                ),
             )
         except Exception as error:
-            self.logger.warn(
-                f"옥토맵 평면 펴기 TF 조회 실패, 이번 프레임은 건너뜀: {error}",
-                throttle_duration_sec=5.0,
+            self.logger.warning(
+                "[STATIC OCTOMAP] TF unavailable; frame dropped: "
+                f"{self.base_frame} <- {msg.header.frame_id}: {error}"
             )
-            return xyz
+            return None
 
         t = transform.transform.translation
         q = transform.transform.rotation
-        translation = np.array([t.x, t.y, t.z], dtype=np.float64)
-        rotation = Rotation.from_quat([q.x, q.y, q.z, q.w])
-
-        base_xyz = rotation.apply(xyz.astype(np.float64)) + translation
-        flattened_base = _flatten_floor_points(
-            base_xyz, self.octomap_flatten_band_m, self.octomap_flatten_percentile
+        R_base_cloud = Rotation.from_quat(
+            [q.x, q.y, q.z, q.w]
+        ).as_matrix()
+        trans = np.array(
+            [t.x, t.y, t.z],
+            dtype=np.float64,
         )
-        sensor_xyz = rotation.inv().apply(flattened_base - translation)
-        return sensor_xyz.astype(np.float32)
 
-    def _filter_octomap_cloud(self, msg):
-        """Denoise every relayed frame, and additionally drop the targeted
-        component's YOLO mask from it while a pick exclusion is active.
+        xyz_base = (
+            R_base_cloud @ xyz_camera.T
+        ).T + trans
 
-        Denoising always runs, not just during pick exclusion — a flying-
-        pixel edge point bakes into the octomap exactly like a real object
-        does (single hit -> occupied, no partial erase), so a stray point in
-        mid-air during any observation is just as permanent as the object
-        it's mistaken for.
-        """
-        offsets = {field.name: field.offset for field in msg.fields}
+        voxel_size = (
+            self.static_octomap_voxel_size_m
+        )
+        voxel_indices = np.floor(
+            xyz_base / voxel_size
+        ).astype(np.int64)
+
+        # One raw representative per occupied 1 cm voxel.
+        unique_voxels, first_local = np.unique(
+            voxel_indices,
+            axis=0,
+            return_index=True,
+        )
+        representative_rows = source_indices[
+            first_local
+        ]
+
+        if len(unique_voxels) == 0:
+            return None
+
+        # Exact 3x3x3 neighborhood:
+        # p=inf and r=1 means max(|dx|,|dy|,|dz|) <= 1.
+        tree = cKDTree(
+            unique_voxels.astype(np.float64)
+        )
+        neighbor_counts = tree.query_ball_point(
+            unique_voxels.astype(np.float64),
+            r=1.0 + 1e-9,
+            p=np.inf,
+            return_length=True,
+        )
+        neighbor_counts = np.asarray(
+            neighbor_counts,
+            dtype=np.int32,
+        )
+
+        density_ok = (
+            neighbor_counts
+            >= self.static_octomap_neighbor_min_count
+        )
+        output_rows = representative_rows[
+            density_ok
+        ]
+
+        self._static_octomap_frames += 1
+        self._static_octomap_input_points += int(
+            n_points
+        )
+        self._static_octomap_invalid_or_near_dropped += int(
+            n_points - len(source_indices)
+        )
+        self._static_octomap_voxels_before_density += int(
+            len(unique_voxels)
+        )
+        self._static_octomap_density_dropped += int(
+            len(unique_voxels)
+            - np.count_nonzero(density_ok)
+        )
+        self._static_octomap_output_voxels += int(
+            len(output_rows)
+        )
+
+        if (
+            self._static_octomap_frames == 1
+            or self._static_octomap_frames % 10 == 0
+        ):
+            self.logger.info(
+                "[STATIC OCTOMAP FILTER] "
+                f"frame={self._static_octomap_frames}, "
+                f"raw={n_points}, "
+                f"depth>=0.28m={len(source_indices)}, "
+                f"voxels_1cm={len(unique_voxels)}, "
+                f"kept_3x3x3={len(output_rows)}, "
+                f"neighbor_min="
+                f"{self.static_octomap_neighbor_min_count}/27"
+            )
+
+        return self._cloud_from_selected_rows(
+            msg,
+            output_rows,
+        )
+
+    def set_octomap_exclusion(self, base_xyz_mm, radius_mm):
+        """Legacy API retained; frozen static maps ignore later cloud changes."""
+        if not self.octomap_enabled:
+            return
+        self._octomap_exclusion = (
+            [float(v) / 1000.0 for v in base_xyz_mm],
+            float(radius_mm) / 1000.0,
+        )
+
+    def clear_octomap_exclusion(self):
+        self._octomap_exclusion = None
+
+    def _exclude_from_cloud(self, msg):
+        """Legacy sphere filter retained for compatibility with older helpers."""
+        center_base, radius_m = self._octomap_exclusion
+        try:
+            transform = self._tf_buffer.lookup_transform(
+                msg.header.frame_id,
+                self.base_frame,
+                Time(),
+            )
+        except Exception:
+            return None
+
+        t = transform.transform.translation
+        q = transform.transform.rotation
+        rot = Rotation.from_quat(
+            [q.x, q.y, q.z, q.w]
+        )
+        center_cloud = (
+            rot.apply(center_base)
+            + [t.x, t.y, t.z]
+        )
+
+        offsets = {
+            field.name: field.offset
+            for field in msg.fields
+        }
         if not {"x", "y", "z"} <= offsets.keys():
-            return msg  # 예상 못한 필드 구성이면 거르지 않고 그냥 흘려보낸다
+            return msg
 
         n_points = len(msg.data) // msg.point_step
         if n_points == 0:
             return msg
 
-        # ponytail: x,y,z 가 연속 float32 라고 가정한다 (RealSense 정렬
-        # 클라우드의 표준 레이아웃). 다른 레이아웃이면 이 assumption 이
-        # _mask_cloud_polygon/_remove_outlier_points 안에서 그냥 조용히
-        # 틀린 값을 낼 수 있다 — sensors_3d.yaml 이 가리키는 토픽이 실제로
-        # 표준 XYZ 레이아웃인지 의심되면 offsets 를 로그로 찍어서 확인할 것.
-        xyz = np.ndarray(
-            (n_points, 3),
-            dtype=np.float32,
-            buffer=msg.data,
-            strides=(msg.point_step, 4),
-            offset=offsets["x"],
+        keep = _mask_cloud_sphere(
+            msg.data,
+            msg.point_step,
+            offsets["x"],
+            center_cloud,
+            radius_m,
         )
-
-        # 그레이징 앵글 계단 노이즈: 바닥/트레이 면 높이를 base_frame 기준
-        # 으로 눌러 편다. 원본 xyz(센서 프레임)는 건드리지 않고, 뒤에서
-        # kept 행만 이 보정값으로 덮어쓴다.
-        flat_xyz = xyz
-        if self.octomap_flatten_floor_enabled:
-            flat_xyz = self._flatten_floor_in_sensor_frame(xyz, msg.header)
-
-        keep = _remove_outlier_points(
-            flat_xyz, self.octomap_denoise_voxel_m, self.octomap_denoise_min_neighbors
-        )
-
-        if self._octomap_exclusion_component is not None:
-            # masking_maps는 신선도 체크 "뒤"에 읽어야 한다. motion.py는
-            # MultiThreadedExecutor(2 threads)로 돌아서 이 사이에
-            # _detection_callback이 다른 스레드에서 _latest_detection_masks를
-            # 통째로 교체할 수 있다 — 먼저 읽어두면 신선도 체크는 방금 갱신된
-            # (마스크 있음) 상태를 보고 통과시키는데 정작 쓰는 값은 그 전에
-            # 읽은 옛 스냅숏(None)이라 _mask_cloud_polygon이 None을 순회하며
-            # 죽는 경합이 생긴다.
-            fresh = (
-                self._has_fresh_exclusion_mask() and self._camera_intrinsics is not None
-            )
-            masking_maps = (
-                self._latest_detection_masks.get(self._octomap_exclusion_component)
-                if fresh
-                else None
-            )
-            if not masking_maps:
-                self.logger.warn(
-                    "옥토맵 예외 미적용(디노이즈만 적용): "
-                    f"component={self._octomap_exclusion_component}, "
-                    f"mask={'없음' if not masking_maps else '있음'}, "
-                    f"intrinsics={'없음' if self._camera_intrinsics is None else '있음'}",
-                    throttle_duration_sec=2.0,
-                )
-            else:
-                keep &= _mask_cloud_polygon(
-                    flat_xyz,
-                    masking_maps,
-                    self._camera_intrinsics,
-                    self._camera_width,
-                    self._camera_height,
-                    self.octomap_exclusion_mask_padding_px,
-                )
-                self.logger.info(
-                    "옥토맵 예외 적용: "
-                    f"component={self._octomap_exclusion_component}, "
-                    f"instances={len(masking_maps)}",
-                    throttle_duration_sec=2.0,
-                )
-
-        kept = int(np.count_nonzero(keep))
-        self.logger.info(
-            f"옥토맵 디노이즈: total={n_points}, kept={kept}, dropped={n_points - kept}",
-            throttle_duration_sec=5.0,
-        )
-        raw = np.frombuffer(msg.data, dtype=np.uint8).reshape(
-            n_points, msg.point_step
-        )
-        filtered_raw = raw[keep]
-
-        if flat_xyz is not xyz:
-            # 평면 펴기로 좌표가 바뀐 경우, 살아남은 행의 x,y,z 바이트만
-            # 보정값으로 덮어쓴다. filtered_raw 는 불리언 인덱싱이 만든
-            # 새 배열(쓰기 가능)이라 msg.data 원본은 그대로 안전하다.
-            xyz_kept_view = np.ndarray(
-                (kept, 3),
-                dtype=np.float32,
-                buffer=filtered_raw,
-                strides=(msg.point_step, 4),
-                offset=offsets["x"],
-            )
-            xyz_kept_view[...] = flat_xyz[keep]
+        raw = np.frombuffer(
+            msg.data,
+            dtype=np.uint8,
+        ).reshape(n_points, msg.point_step)
 
         filtered = PointCloud2()
         filtered.header = msg.header
         filtered.height = 1
-        filtered.width = kept
+        filtered.width = int(np.count_nonzero(keep))
         filtered.fields = msg.fields
         filtered.is_bigendian = msg.is_bigendian
         filtered.point_step = msg.point_step
         filtered.row_step = msg.point_step * filtered.width
         filtered.is_dense = msg.is_dense
-        filtered.data = filtered_raw.tobytes()
+        filtered.data = raw[keep].tobytes()
         return filtered
 
-    def set_octomap_mapping(self, enabled):
-        """Open/close the point-cloud gate that feeds MoveIt's octomap.
-
-        Only open it while the arm is parked. The camera is eye-in-hand, so a
-        cloud captured mid-motion is registered with the wrong TF and smears
-        voxels across the workspace.
-        """
+    def set_octomap_mapping(self, enabled, *, force=False):
+        """Gate PointCloud2 input; frozen maps can never be reopened normally."""
         if not self.octomap_enabled:
             return False
 
         enabled = bool(enabled)
+<<<<<<< HEAD
         if enabled and self._octomap_frozen:
             # 지도 확정 후에는 어떤 호출자가 열려고 해도 열지 않는다. 닫는
             # 방향(False)은 그대로 통과 — 이미 닫혀 있어 사실상 무해하다.
@@ -984,6 +1149,15 @@ class Motion:
                 "Octomap 확정 상태라 게이트를 다시 열지 않는다",
                 throttle_duration_sec=10.0,
             )
+=======
+
+        if (
+            enabled
+            and self._static_octomap_frozen
+            and not force
+        ):
+            self._octomap_mapping = False
+>>>>>>> 880445f5e4eee24b85be0cbe1b6736a3f2e691ee
             return False
 
         if enabled != self._octomap_mapping:
@@ -991,20 +1165,16 @@ class Motion:
                 f"Octomap mapping {'ON' if enabled else 'OFF'} "
                 f"({self.octomap_cloud_in} -> {self.octomap_cloud_out})"
             )
+
         self._octomap_mapping = enabled
         return enabled
 
-    def clear_octomap(self):
-        """Drop every voxel MoveIt has collected.
-
-        Voxels are never un-occupied by a new cloud that simply no longer sees
-        them, so a picked-up object would haunt the map forever. Clear right
-        before re-opening the gate at an observation/inspection pose; never
-        during a pick, or the map the arm is avoiding disappears.
-        """
+    def clear_octomap(self, *, force=False):
+        """Clear MoveIt's tree unless it has already been frozen read-only."""
         if not self.octomap_enabled:
             return False
 
+<<<<<<< HEAD
         if self._octomap_frozen:
             # 확정된 지도를 지우면 그 뒤 구간이 장애물 없는 빈 지도로 계획한다.
             # 다시 채울 촬영 기회가 없으므로(작업당 2회로 끝) 거부한다.
@@ -1012,15 +1182,33 @@ class Motion:
             return False
 
         future = self._clear_octomap_client.call_async(Empty.Request())
+=======
+        if (
+            self._static_octomap_frozen
+            and not force
+        ):
+            return False
+
+        future = self._clear_octomap_client.call_async(
+            Empty.Request()
+        )
+>>>>>>> 880445f5e4eee24b85be0cbe1b6736a3f2e691ee
         try:
-            self._wait_future(future, self.server_timeout, "ClearOctomap")
+            self._wait_future(
+                future,
+                self.server_timeout,
+                "ClearOctomap",
+            )
         except Exception as error:
-            self.logger.warning(f"ClearOctomap failed: {error}")
+            self.logger.warning(
+                f"ClearOctomap failed: {error}"
+            )
             return False
 
         self.logger.info("Octomap cleared")
         return True
 
+<<<<<<< HEAD
     def prepare_octomap_for_new_task(self):
         """Clear an old task's map before waiting for its next command."""
         if not self.octomap_enabled:
@@ -1030,6 +1218,110 @@ class Motion:
         self._octomap_frozen = False
         self.set_octomap_mapping(False)
         return self.clear_octomap()
+=======
+    def start_static_octomap_scan(self):
+        """Move to inspection_pose and open the only map-building window."""
+        if not self.octomap_enabled:
+            self.static_octomap_initialized = True
+            self._static_octomap_frozen = True
+            self.logger.warning(
+                "Octomap disabled; static-map scan skipped"
+            )
+            return False
+
+        if self.static_octomap_initialized:
+            self.logger.info(
+                "Static OctoMap already initialized; scan skipped"
+            )
+            return False
+
+        # Discard anything MoveIt may have retained from an older controller run.
+        self.set_octomap_mapping(
+            False,
+            force=True,
+        )
+        self.clear_octomap(
+            force=True
+        )
+        self.clear_octomap_exclusion()
+
+        # Move to the one fixed scan pose while map input is closed.
+        self._move_named_position(
+            "inspection_pose"
+        )
+
+        # Start statistics exactly when the gate opens.
+        self._static_octomap_frames = 0
+        self._static_octomap_input_points = 0
+        self._static_octomap_invalid_or_near_dropped = 0
+        self._static_octomap_voxels_before_density = 0
+        self._static_octomap_density_dropped = 0
+        self._static_octomap_output_voxels = 0
+
+        self._static_octomap_scan_active = True
+        self.set_octomap_mapping(
+            True,
+            force=True,
+        )
+
+        self.logger.info(
+            "[STATIC OCTOMAP] START "
+            f"scan={self.static_octomap_scan_sec:.1f}s, "
+            f"voxel={self.static_octomap_voxel_size_m*100.0:.1f}cm, "
+            f"min_depth={self.static_octomap_min_depth_m*100.0:.0f}cm, "
+            "neighborhood=3x3x3, "
+            f"min_occupied="
+            f"{self.static_octomap_neighbor_min_count}/27"
+        )
+        self.logger.warning(
+            "[STATIC OCTOMAP] The relay cloud is quantized to 1 cm. "
+            "For a true 1 cm MoveIt OctoMap, move_group parameter "
+            "'octomap_resolution' must also be 0.01."
+        )
+        return True
+
+    def finish_static_octomap_scan(self):
+        """Permanently close mapping and preserve this map until Motion exits."""
+        if self.static_octomap_initialized:
+            return True
+
+        if not self.octomap_enabled:
+            self.static_octomap_initialized = True
+            self._static_octomap_frozen = True
+            return True
+
+        self.set_octomap_mapping(
+            False,
+            force=True,
+        )
+        self._static_octomap_scan_active = False
+        self.clear_octomap_exclusion()
+
+        if self._static_octomap_frames == 0:
+            # Do not mark an empty tree as a valid persistent map.
+            raise RuntimeError(
+                "Static OctoMap scan received no valid PointCloud2 frame"
+            )
+
+        self.static_octomap_initialized = True
+        self._static_octomap_frozen = True
+
+        self.logger.info(
+            "[STATIC OCTOMAP] FROZEN | "
+            f"frames={self._static_octomap_frames}, "
+            f"raw_points={self._static_octomap_input_points}, "
+            f"invalid_or_depth_lt_28cm_dropped="
+            f"{self._static_octomap_invalid_or_near_dropped}, "
+            f"voxels_before_density="
+            f"{self._static_octomap_voxels_before_density}, "
+            f"density_dropped="
+            f"{self._static_octomap_density_dropped}, "
+            f"published_voxels="
+            f"{self._static_octomap_output_voxels}"
+        )
+
+        return True
+>>>>>>> 880445f5e4eee24b85be0cbe1b6736a3f2e691ee
 
     def _allow_octomap_collisions(self):
         """Excuse the gripper links from octomap collisions, once, at startup.
@@ -1273,6 +1565,7 @@ class Motion:
         return self._move_named_position("home")
 
     def move_to_observation_pose(self):
+<<<<<<< HEAD
         # observation_pose는 motion.yaml의 Cartesian [x,y,z,A,B,C] 목표다.
         # A/B/C는 intrinsic ZYZ Euler로 저장하고, _move_named_position()
         # -> move_pose() -> _pose6_to_ros_pose()에서 quaternion으로 변환해
@@ -1365,6 +1658,21 @@ class Motion:
         self.clear_octomap()
         self.set_octomap_mapping(True)
         return result
+=======
+        # Static map is read-only. Observation changes only the robot pose.
+        self.set_octomap_mapping(False)
+        return self._move_named_position("observation_pose")
+
+    def move_to_inspection_pose(self, clear_before=False):
+        # Final inspection and every later visit are movement-only.
+        # clear_before=True is accepted for compatibility with older callers,
+        # but only an uninitialized process may start the one-time scan.
+        if clear_before and not self.static_octomap_initialized:
+            return self.start_static_octomap_scan()
+
+        self.set_octomap_mapping(False)
+        return self._move_named_position("inspection_pose")
+>>>>>>> 880445f5e4eee24b85be0cbe1b6736a3f2e691ee
 
     # ------------------------------------------------------------------
     # Current TCP pose: keep old DSR posx-compatible mm + ZYZ-degree format
@@ -1667,6 +1975,1293 @@ class Motion:
             self.move_pose(waypoint)
 
     # ------------------------------------------------------------------
+    # LIVE 컵라면: FoundationPose -> GraspGenX -> Top5 -> exact execution
+    # ------------------------------------------------------------------
+
+    def _cup_call_perception_once(self):
+        """Trigger one live perception request and require a fresh NPZ snapshot.
+
+        The service client belongs to Motion's private node, whose executor spins
+        on a background thread, so this method can synchronously wait without
+        deadlocking Controller's manual spin loop.
+        """
+        if not self._cup_perception_client.wait_for_service(
+            timeout_sec=self.server_timeout
+        ):
+            raise RuntimeError(
+                f"Cup perception service unavailable: {self.cup_grasp_service}"
+            )
+
+        old_mtime_ns = (
+            os.stat(self.cup_grasp_snapshot).st_mtime_ns
+            if os.path.isfile(self.cup_grasp_snapshot)
+            else None
+        )
+
+        future = self._cup_perception_client.call_async(
+            Trigger.Request()
+        )
+        response = self._wait_future(
+            future,
+            self.cup_grasp_perception_timeout_sec,
+            "Cup FoundationPose/GraspGenX perception",
+        )
+
+        if response is None:
+            raise RuntimeError(
+                "Cup perception returned no response"
+            )
+
+        if not response.success:
+            message = str(response.message)
+
+            # These are normal "try another observation" outcomes, not backend
+            # infrastructure failures.  Returning False lets Controller's existing
+            # grasp-retry path re-observe and try again.
+            retryable_markers = (
+                "TARGET_NOT_DETECTED",
+                "not detected",
+                "No GraspGenX candidate satisfies",
+                "zero grasp",
+                "no grasp",
+            )
+            if any(marker.lower() in message.lower() for marker in retryable_markers):
+                self.logger.warning(
+                    f"Cup perception produced no usable grasp: {message}"
+                )
+                return None
+
+            raise RuntimeError(
+                "Cup perception failed: " + message
+            )
+
+        # The pipeline writes the NPZ atomically before returning success.  Still
+        # require mtime freshness so an old candidate file can never be executed.
+        deadline = (
+            time.monotonic()
+            + self.cup_grasp_snapshot_timeout_sec
+        )
+        while time.monotonic() < deadline:
+            if os.path.isfile(self.cup_grasp_snapshot):
+                new_mtime_ns = os.stat(
+                    self.cup_grasp_snapshot
+                ).st_mtime_ns
+                if old_mtime_ns is None or new_mtime_ns != old_mtime_ns:
+                    self.logger.info(
+                        "Fresh live GraspGenX snapshot: "
+                        f"{self.cup_grasp_snapshot}"
+                    )
+                    return response
+            time.sleep(0.02)
+
+        raise RuntimeError(
+            "Cup perception succeeded but no fresh candidate snapshot appeared: "
+            f"{self.cup_grasp_snapshot}"
+        )
+
+    def _cup_load_snapshot(self):
+        """Load exact raw candidates returned by the current live inference."""
+        with np.load(
+            self.cup_grasp_snapshot,
+            allow_pickle=False,
+        ) as data:
+            if "grasps" not in data or "confidences" not in data:
+                raise ValueError(
+                    "Live GraspGenX snapshot must contain "
+                    "'grasps' and 'confidences'"
+                )
+
+            grasps = np.asarray(
+                data["grasps"],
+                dtype=np.float64,
+            ).reshape(-1, 4, 4)
+
+            scores = np.asarray(
+                data["confidences"],
+                dtype=np.float64,
+            ).reshape(-1)
+
+            object_pc = (
+                np.asarray(
+                    data["point_cloud"],
+                    dtype=np.float64,
+                ).reshape(-1, 3)
+                if "point_cloud" in data
+                else None
+            )
+
+        if len(grasps) != len(scores):
+            raise ValueError(
+                "Live GraspGenX snapshot length mismatch: "
+                f"grasps={len(grasps)}, scores={len(scores)}"
+            )
+        if len(grasps) == 0:
+            raise RuntimeError(
+                "Live GraspGenX returned zero candidates"
+            )
+        if not np.all(np.isfinite(grasps)):
+            raise ValueError(
+                "Live GraspGenX grasps contain non-finite values"
+            )
+        if not np.all(np.isfinite(scores)):
+            raise ValueError(
+                "Live GraspGenX scores contain non-finite values"
+            )
+
+        return grasps, scores, object_pc
+
+    def _cup_filter_top_candidates(
+        self,
+        T_base_camera,
+        grasps,
+        scores,
+    ):
+        """base_link -Z 기준 30도 이내만 남기고 score 순 Top-K를 반환."""
+        R_base_camera = np.asarray(
+            T_base_camera,
+            dtype=np.float64,
+        ).reshape(4, 4)[:3, :3]
+
+        # GraspGenX canonical local +Z = approach direction.
+        approach_camera = grasps[:, :3, 2]
+        approach_base = (
+            R_base_camera
+            @ approach_camera.T
+        ).T
+
+        norms = np.linalg.norm(
+            approach_base,
+            axis=1,
+        )
+        finite = (
+            np.isfinite(approach_base).all(axis=1)
+            & np.isfinite(scores)
+            & (norms > 1e-9)
+        )
+
+        unit = np.zeros_like(
+            approach_base,
+            dtype=np.float64,
+        )
+        unit[finite] = (
+            approach_base[finite]
+            / norms[finite, None]
+        )
+
+        # angle(unit, base -Z), dot(unit, [0,0,-1]) == -unit_z
+        cos_angle = np.clip(
+            -unit[:, 2],
+            -1.0,
+            1.0,
+        )
+        tilt_deg = np.full(
+            len(grasps),
+            np.inf,
+            dtype=np.float64,
+        )
+        tilt_deg[finite] = np.degrees(
+            np.arccos(cos_angle[finite])
+        )
+
+        valid = np.flatnonzero(
+            finite
+            & (
+                tilt_deg
+                <= self.cup_grasp_max_tilt_deg
+            )
+        )
+
+        if len(valid) == 0:
+            finite_tilts = tilt_deg[
+                np.isfinite(tilt_deg)
+            ]
+            closest = (
+                float(np.min(finite_tilts))
+                if len(finite_tilts)
+                else float("inf")
+            )
+            self.logger.warning(
+                "No cup grasp inside base -Z cone: "
+                f"limit={self.cup_grasp_max_tilt_deg:.1f}deg, "
+                f"closest={closest:.2f}deg"
+            )
+            return [], tilt_deg, unit
+
+        ordered = valid[
+            np.argsort(-scores[valid])
+        ]
+        top = ordered[
+            : min(
+                self.cup_grasp_top_k,
+                len(ordered),
+            )
+        ]
+
+        self.logger.info(
+            "[CUP GRASP FILTER] "
+            f"raw={len(grasps)}, "
+            f"valid={len(valid)}, "
+            f"top_k={len(top)}, "
+            f"tilt_limit={self.cup_grasp_max_tilt_deg:.1f}deg"
+        )
+
+        return [
+            int(index)
+            for index in top
+        ], tilt_deg, unit
+
+    def _cup_prepare_candidate(
+        self,
+        T_base_camera,
+        T_camera_grasp,
+    ):
+        """Use the exact transform chain validated by the standalone test.
+
+        T_base_tool0 =
+            T_base_camera
+            @ T_camera_grasp
+            @ T_grasp_tool0
+
+        PREGRASP is grasp-frame -Z by 70 mm.
+
+        If MoveIt EEF is link_6:
+            T_base_eef = T_base_tool0 @ T_tool0_eef
+        """
+        T_base_camera = np.asarray(
+            T_base_camera,
+            dtype=np.float64,
+        ).reshape(4, 4)
+        T_camera_grasp = np.asarray(
+            T_camera_grasp,
+            dtype=np.float64,
+        ).reshape(4, 4)
+
+        T_tool0_eef = self._lookup_transform_matrix(
+            "tool0",
+            self.eef_link,
+        )
+
+        T_base_grasp = (
+            T_base_camera
+            @ T_camera_grasp
+        )
+        T_base_tool0 = (
+            T_base_grasp
+            @ self.cup_grasp_T_grasp_tool0
+        )
+        T_base_eef = (
+            T_base_tool0
+            @ T_tool0_eef
+        )
+
+        distance_m = (
+            self.cup_grasp_pregrasp_distance_mm
+            / 1000.0
+        )
+        T_camera_pregrasp = (
+            T_camera_grasp
+            @ self._translation_matrix_m(
+                z=-distance_m
+            )
+        )
+        T_base_tool0_pre = (
+            T_base_camera
+            @ T_camera_pregrasp
+            @ self.cup_grasp_T_grasp_tool0
+        )
+        T_base_eef_pre = (
+            T_base_tool0_pre
+            @ T_tool0_eef
+        )
+
+        return {
+            "T_camera_grasp": T_camera_grasp,
+            "T_base_tool0": T_base_tool0,
+            "T_base_tool0_pre": T_base_tool0_pre,
+            "grasp_pose6": self._matrix_m_to_pose6(
+                T_base_eef
+            ),
+            "pregrasp_pose6": self._matrix_m_to_pose6(
+                T_base_eef_pre
+            ),
+        }
+
+    def _cup_make_pose_constraints(
+        self,
+        target_pose,
+        position_tolerance_mm=2.0,
+        orientation_tolerance_deg=2.0,
+    ):
+        ros_pose = self._pose6_to_ros_pose(
+            target_pose
+        )
+
+        constraints = Constraints()
+        constraints.name = "cup_top5_pregrasp_goal"
+
+        position_constraint = PositionConstraint()
+        position_constraint.header.frame_id = self.base_frame
+        position_constraint.link_name = self.eef_link
+        position_constraint.weight = 1.0
+
+        tolerance_m = (
+            float(position_tolerance_mm)
+            / 1000.0
+        )
+        box = SolidPrimitive()
+        box.type = SolidPrimitive.BOX
+        box.dimensions = [
+            2.0 * tolerance_m,
+            2.0 * tolerance_m,
+            2.0 * tolerance_m,
+        ]
+
+        box_pose = Pose()
+        box_pose.position.x = ros_pose.position.x
+        box_pose.position.y = ros_pose.position.y
+        box_pose.position.z = ros_pose.position.z
+        box_pose.orientation.w = 1.0
+
+        position_constraint.constraint_region.primitives.append(
+            box
+        )
+        position_constraint.constraint_region.primitive_poses.append(
+            box_pose
+        )
+        constraints.position_constraints.append(
+            position_constraint
+        )
+
+        orientation_constraint = OrientationConstraint()
+        orientation_constraint.header.frame_id = self.base_frame
+        orientation_constraint.link_name = self.eef_link
+        orientation_constraint.orientation = ros_pose.orientation
+
+        tolerance_rad = math.radians(
+            float(orientation_tolerance_deg)
+        )
+        orientation_constraint.absolute_x_axis_tolerance = tolerance_rad
+        orientation_constraint.absolute_y_axis_tolerance = tolerance_rad
+        orientation_constraint.absolute_z_axis_tolerance = tolerance_rad
+        orientation_constraint.weight = 1.0
+        constraints.orientation_constraints.append(
+            orientation_constraint
+        )
+
+        return constraints
+
+    def _cup_plan_pregrasp_only(
+        self,
+        target_pose,
+    ):
+        """Current real robot state -> PREGRASP, plan_only=True."""
+        self.set_octomap_mapping(False)
+
+        goal = MoveGroup.Goal()
+        goal.request.group_name = self.group_name
+        goal.request.num_planning_attempts = self.planning_attempts
+        goal.request.allowed_planning_time = self.planning_time
+        goal.request.max_velocity_scaling_factor = self._clamp_scale(
+            self.default_joint_velocity_scale
+        )
+        goal.request.max_acceleration_scaling_factor = self._clamp_scale(
+            self.default_joint_acceleration_scale
+        )
+        goal.request.goal_constraints = [
+            self._cup_make_pose_constraints(
+                target_pose
+            )
+        ]
+        goal.request.start_state.is_diff = True
+
+        if self.pipeline_id:
+            goal.request.pipeline_id = self.pipeline_id
+        if self.planner_id:
+            goal.request.planner_id = self.planner_id
+
+        # CRITICAL: validate only; do not move the real arm.
+        goal.planning_options.plan_only = True
+        goal.planning_options.look_around = False
+        goal.planning_options.replan = False
+        goal.planning_options.replan_attempts = 0
+        goal.planning_options.replan_delay = 0.0
+        goal.planning_options.planning_scene_diff.is_diff = True
+        goal.planning_options.planning_scene_diff.robot_state.is_diff = True
+
+        send_future = self._move_group_client.send_goal_async(
+            goal
+        )
+        handle = self._wait_future(
+            send_future,
+            self.server_timeout,
+            "sending cup PREGRASP plan-only goal",
+        )
+        if handle is None or not handle.accepted:
+            raise RuntimeError(
+                "Cup PREGRASP MoveGroup goal rejected"
+            )
+
+        wrapped = self._wait_future(
+            handle.get_result_async(),
+            self.motion_timeout,
+            "cup PREGRASP plan-only",
+        )
+        result = wrapped.result
+        code = int(result.error_code.val)
+
+        if code != MoveItErrorCodes.SUCCESS:
+            raise RuntimeError(
+                "Cup PREGRASP planning failed: "
+                + self._error_name(code)
+            )
+
+        trajectory = result.planned_trajectory
+        if not trajectory.joint_trajectory.points:
+            raise RuntimeError(
+                "Cup PREGRASP returned empty trajectory"
+            )
+
+        return trajectory
+
+    @staticmethod
+    def _cup_state_from_trajectory_end(
+        trajectory,
+    ):
+        jt = trajectory.joint_trajectory
+
+        state = RobotState()
+        state.is_diff = True
+
+        if not jt.joint_names or not jt.points:
+            return state
+
+        last = jt.points[-1]
+        state.joint_state.name = list(
+            jt.joint_names
+        )
+        state.joint_state.position = list(
+            last.positions
+        )
+        state.joint_state.velocity = [
+            0.0
+        ] * len(last.positions)
+
+        return state
+
+    def _cup_plan_cartesian_only(
+        self,
+        start_state,
+        target_pose,
+        *,
+        avoid_collisions,
+        description,
+    ):
+        """Synthetic start state -> target, plan only."""
+        ros_pose = self._pose6_to_ros_pose(
+            target_pose
+        )
+
+        request = GetCartesianPath.Request()
+        request.header.frame_id = self.base_frame
+        request.header.stamp = (
+            self._moveit_node
+            .get_clock()
+            .now()
+            .to_msg()
+        )
+        request.start_state = start_state
+        request.group_name = self.group_name
+        request.link_name = self.eef_link
+        request.waypoints = [ros_pose]
+
+        request.max_step = self.cartesian_max_step_m
+        request.jump_threshold = self.cartesian_jump_threshold
+        request.prismatic_jump_threshold = (
+            self.cartesian_prismatic_jump_threshold
+        )
+        request.revolute_jump_threshold = (
+            self.cartesian_revolute_jump_threshold
+        )
+        request.avoid_collisions = bool(
+            avoid_collisions
+        )
+
+        request.max_velocity_scaling_factor = 1.0
+        request.max_acceleration_scaling_factor = self._clamp_scale(
+            self.cup_grasp_linear_acc_mm_s2
+            / self.cartesian_acc_reference_mm_s2
+        )
+        request.cartesian_speed_limited_link = self.eef_link
+        request.max_cartesian_speed = (
+            self.cup_grasp_linear_vel_mm_s
+            / 1000.0
+        )
+
+        response = self._wait_future(
+            self._cartesian_client.call_async(
+                request
+            ),
+            self.motion_timeout,
+            description,
+        )
+
+        if response is None:
+            raise RuntimeError(
+                f"{description}: no response"
+            )
+
+        code = int(
+            response.error_code.val
+        )
+        if code != MoveItErrorCodes.SUCCESS:
+            raise RuntimeError(
+                f"{description}: "
+                + self._error_name(code)
+            )
+
+        fraction = float(
+            response.fraction
+        )
+        if fraction < self.cartesian_min_fraction:
+            raise RuntimeError(
+                f"{description}: fraction={fraction:.3f} "
+                f"< {self.cartesian_min_fraction:.3f}"
+            )
+
+        if not response.solution.joint_trajectory.points:
+            raise RuntimeError(
+                f"{description}: empty trajectory"
+            )
+
+        return response.solution, fraction
+
+    def _cup_validate_candidate(
+        self,
+        pregrasp_pose,
+        grasp_pose,
+    ):
+        """Validate all motion segments before any robot motion."""
+        pregrasp_trajectory = (
+            self._cup_plan_pregrasp_only(
+                pregrasp_pose
+            )
+        )
+
+        pregrasp_state = (
+            self._cup_state_from_trajectory_end(
+                pregrasp_trajectory
+            )
+        )
+
+        approach_trajectory, approach_fraction = (
+            self._cup_plan_cartesian_only(
+                pregrasp_state,
+                grasp_pose,
+                avoid_collisions=True,
+                description=(
+                    "cup PREGRASP -> GRASP "
+                    "Cartesian plan-only"
+                ),
+            )
+        )
+
+        grasp_state = (
+            self._cup_state_from_trajectory_end(
+                approach_trajectory
+            )
+        )
+
+        retreat_trajectory, retreat_fraction = (
+            self._cup_plan_cartesian_only(
+                grasp_state,
+                pregrasp_pose,
+                avoid_collisions=False,
+                description=(
+                    "cup GRASP -> PREGRASP "
+                    "retreat plan-only"
+                ),
+            )
+        )
+
+        return {
+            "pregrasp_trajectory": pregrasp_trajectory,
+            "approach_trajectory": approach_trajectory,
+            "retreat_trajectory": retreat_trajectory,
+            "approach_fraction": approach_fraction,
+            "retreat_fraction": retreat_fraction,
+        }
+
+    def _cup_execute_exact_trajectory(
+        self,
+        trajectory,
+        description,
+    ):
+        """Execute the exact RobotTrajectory that passed plan-only validation."""
+        goal = ExecuteTrajectory.Goal()
+        goal.trajectory = trajectory
+        goal.controller_names = []
+
+        handle = self._wait_future(
+            self._execute_client.send_goal_async(
+                goal
+            ),
+            self.server_timeout,
+            f"sending {description}",
+        )
+
+        if handle is None or not handle.accepted:
+            raise RuntimeError(
+                f"{description}: ExecuteTrajectory rejected"
+            )
+
+        wrapped = self._wait_future(
+            handle.get_result_async(),
+            self.motion_timeout,
+            description,
+        )
+
+        code = int(
+            wrapped.result.error_code.val
+        )
+        if code != MoveItErrorCodes.SUCCESS:
+            raise RuntimeError(
+                f"{description}: "
+                + self._error_name(code)
+            )
+
+    def _cup_target_exclusion_from_pc(
+        self,
+        T_base_camera,
+        object_pc,
+    ):
+        """Compute base-frame sphere exclusion from the live complete object PC."""
+        if object_pc is None:
+            return None
+
+        pc = np.asarray(
+            object_pc,
+            dtype=np.float64,
+        ).reshape(-1, 3)
+        pc = pc[
+            np.all(
+                np.isfinite(pc),
+                axis=1,
+            )
+        ]
+        if len(pc) < 10:
+            return None
+
+        T = np.asarray(
+            T_base_camera,
+            dtype=np.float64,
+        ).reshape(4, 4)
+        pc_base = (
+            T[:3, :3]
+            @ pc.T
+        ).T + T[:3, 3]
+
+        pmin = pc_base.min(axis=0)
+        pmax = pc_base.max(axis=0)
+        center_m = 0.5 * (
+            pmin + pmax
+        )
+
+        radius_mm = (
+            0.5
+            * float(
+                np.linalg.norm(
+                    pmax - pmin
+                )
+            )
+            * 1000.0
+            + self.graspgenx_exclusion_margin_mm
+        )
+        radius_mm = min(
+            max(
+                radius_mm,
+                self.graspgenx_min_exclusion_radius_mm,
+            ),
+            self.graspgenx_max_exclusion_radius_mm,
+        )
+
+        return (
+            center_m * 1000.0,
+            radius_mm,
+        )
+
+    def pick_cup_graspgenx_live(
+        self,
+        component_name="컵라면",
+    ):
+        """Execute the validated live cup-ramen grasp workflow.
+
+        1. Capture T_base_camera once while stationary at observation pose.
+        2. Trigger ONE FoundationPose -> GraspGenX inference.
+        3. Load the exact 100 raw candidates returned by that inference.
+        4. Keep only base -Z <= 30 deg.
+        5. Score-sort and test up to Top 5.
+        6. Candidate must pass:
+             current -> PREGRASP free-space plan
+             PREGRASP -> GRASP Cartesian fraction
+             GRASP -> PREGRASP retreat fraction
+        7. Execute the exact validated trajectories, without replanning.
+        8. Return RG2 grip detection result.
+
+        False means a normal grasp/observation retry may be attempted by Controller.
+        Infrastructure errors raise RuntimeError and follow Controller's fatal path.
+        """
+        if component_name != self.cup_grasp_component:
+            raise ValueError(
+                "pick_cup_graspgenx_live is reserved for "
+                f"{self.cup_grasp_component!r}, got {component_name!r}"
+            )
+
+        # Eye-in-hand rule: capture once BEFORE perception/arm motion.
+        T_base_camera = self._lookup_transform_matrix(
+            self.base_frame,
+            "camera_color_optical_frame",
+        )
+        self.logger.info(
+            "[CUP] Captured observation-time T_base_camera once: "
+            f"xyz_m={np.round(T_base_camera[:3, 3], 5).tolist()}"
+        )
+
+        perception = self._cup_call_perception_once()
+        if perception is None:
+            return False
+
+        grasps, scores, object_pc = (
+            self._cup_load_snapshot()
+        )
+
+        top_indices, tilt_deg, approach_base = (
+            self._cup_filter_top_candidates(
+                T_base_camera,
+                grasps,
+                scores,
+            )
+        )
+        if not top_indices:
+            return False
+
+        # The initial inspection-pose OctoMap is now frozen read-only.
+        # Never clear/rebuild/carve it during cup grasp generation.
+        self.set_octomap_mapping(False)
+
+        selected = None
+
+        try:
+            # Planning does not move the arm, so every candidate starts from the
+            # same real observation joint state.
+            for rank, index in enumerate(
+                top_indices,
+                start=1,
+            ):
+                score = float(
+                    scores[index]
+                )
+                tilt = float(
+                    tilt_deg[index]
+                )
+                approach = approach_base[
+                    index
+                ]
+
+                prepared = (
+                    self._cup_prepare_candidate(
+                        T_base_camera,
+                        grasps[index],
+                    )
+                )
+
+                pre = prepared[
+                    "pregrasp_pose6"
+                ]
+                grasp = prepared[
+                    "grasp_pose6"
+                ]
+
+                self.logger.info(
+                    f"[CUP CANDIDATE {rank}/{len(top_indices)}] "
+                    f"index={index}, score={score:.4f}, "
+                    f"tilt={tilt:.2f}deg, "
+                    "approach_base=("
+                    f"{approach[0]:+.3f}, "
+                    f"{approach[1]:+.3f}, "
+                    f"{approach[2]:+.3f}), "
+                    f"pre={np.round(pre, 2).tolist()}, "
+                    f"grasp={np.round(grasp, 2).tolist()}"
+                )
+
+                try:
+                    planned = (
+                        self._cup_validate_candidate(
+                            pre,
+                            grasp,
+                        )
+                    )
+                except Exception as error:
+                    self.logger.warning(
+                        f"[CUP CANDIDATE {rank} REJECTED] "
+                        f"index={index}: {error}"
+                    )
+                    continue
+
+                selected = {
+                    "rank": rank,
+                    "index": index,
+                    "score": score,
+                    "tilt": tilt,
+                    "pregrasp_pose6": pre,
+                    "grasp_pose6": grasp,
+                    **planned,
+                }
+
+                self.logger.info(
+                    f"[CUP CANDIDATE {rank} SELECTED] "
+                    f"index={index}, score={score:.4f}, "
+                    f"tilt={tilt:.2f}deg, "
+                    f"approach_fraction="
+                    f"{planned['approach_fraction']:.3f}, "
+                    f"retreat_fraction="
+                    f"{planned['retreat_fraction']:.3f}"
+                )
+                break
+
+            if selected is None:
+                self.logger.error(
+                    f"[CUP] All Top-{len(top_indices)} "
+                    "candidates failed MoveIt validation"
+                )
+                return False
+
+            params = self.grasp_params.get(
+                component_name,
+                self.grasp_params["_default"],
+            )
+            open_width = params["width"]
+            grip_force = params["force"]
+
+            # No arm planning occurs after this point.  We only execute the exact
+            # trajectories that were just validated from the current robot state.
+            self.set_octomap_mapping(False)
+
+            self.logger.info(
+                f"[CUP EXECUTE] selected_rank=#{selected['rank']}, "
+                f"index={selected['index']}, "
+                f"score={selected['score']:.4f}, "
+                f"tilt={selected['tilt']:.2f}deg"
+            )
+
+            self.rg.move_gripper(
+                open_width,
+                force_val=grip_force,
+            )
+            time.sleep(2.0)
+
+            self._cup_execute_exact_trajectory(
+                selected[
+                    "pregrasp_trajectory"
+                ],
+                "cup validated PREGRASP trajectory",
+            )
+
+            self._cup_execute_exact_trajectory(
+                selected[
+                    "approach_trajectory"
+                ],
+                "cup validated GRASP approach trajectory",
+            )
+
+            self.rg.close_gripper(
+                force_val=grip_force
+            )
+            time.sleep(5.0)
+
+            self._cup_execute_exact_trajectory(
+                selected[
+                    "retreat_trajectory"
+                ],
+                "cup validated GRASP retreat trajectory",
+            )
+            time.sleep(1.0)
+
+            status = self.rg.get_status()
+            grip_detected = bool(
+                status[1]
+            )
+            self.logger.info(
+                "[CUP RESULT] "
+                f"status={status}, "
+                f"grip_detected={grip_detected}"
+            )
+
+            return grip_detected
+
+        finally:
+            # Never leave the target permanently carved out of the occupancy input.
+            self.clear_octomap_exclusion()
+
+
+    # ------------------------------------------------------------------
+    # GraspGenX -> MoveIt bridge
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _matrix_from_transform(transform):
+        """geometry_msgs/Transform -> 4x4 matrix in meters."""
+        q = [
+            transform.rotation.x,
+            transform.rotation.y,
+            transform.rotation.z,
+            transform.rotation.w,
+        ]
+        T = np.eye(4, dtype=np.float64)
+        T[:3, :3] = Rotation.from_quat(q).as_matrix()
+        T[:3, 3] = [
+            transform.translation.x,
+            transform.translation.y,
+            transform.translation.z,
+        ]
+        return T
+
+    def _lookup_transform_matrix(self, target_frame, source_frame):
+        """Return T_target_source (source coordinates -> target coordinates)."""
+        if target_frame == source_frame:
+            return np.eye(4, dtype=np.float64)
+        try:
+            stamped = self._tf_buffer.lookup_transform(
+                target_frame,
+                source_frame,
+                Time(),
+                timeout=Duration(seconds=self.tf_timeout),
+            )
+        except Exception as error:
+            raise RuntimeError(
+                f"TF lookup failed: {target_frame} <- {source_frame}: {error}"
+            ) from error
+        return self._matrix_from_transform(stamped.transform)
+
+    @staticmethod
+    def _pose6_to_matrix_m(pose6):
+        """[mm, mm, mm, ZYZ deg] -> T_base_frame in meters."""
+        pose = list(pose6)
+        if len(pose) != 6 or not all(math.isfinite(float(v)) for v in pose):
+            raise ValueError("pose6 must contain six finite values")
+        T = np.eye(4, dtype=np.float64)
+        T[:3, :3] = Rotation.from_euler(
+            "ZYZ", pose[3:6], degrees=True
+        ).as_matrix()
+        T[:3, 3] = np.asarray(pose[:3], dtype=np.float64) / 1000.0
+        return T
+
+    @staticmethod
+    def _matrix_m_to_pose6(T):
+        """4x4 meter transform -> [x_mm,y_mm,z_mm,ZYZ_deg]."""
+        T = np.asarray(T, dtype=np.float64).reshape(4, 4)
+        if not np.all(np.isfinite(T)):
+            raise ValueError("transform contains non-finite values")
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            zyz = Rotation.from_matrix(T[:3, :3]).as_euler("ZYZ", degrees=True)
+        xyz_mm = T[:3, 3] * 1000.0
+        return [
+            float(xyz_mm[0]),
+            float(xyz_mm[1]),
+            float(xyz_mm[2]),
+            float(zyz[0]),
+            float(zyz[1]),
+            float(zyz[2]),
+        ]
+
+    @staticmethod
+    def _translation_matrix_m(x=0.0, y=0.0, z=0.0):
+        T = np.eye(4, dtype=np.float64)
+        T[:3, 3] = [float(x), float(y), float(z)]
+        return T
+
+    def _load_handeye_matrix_m(self):
+        """Load the project's T_parent_camera matrix and normalize translation to m.
+
+        Existing position_estimation.py multiplies
+            T_base_parent @ T_gripper2camera
+        so the file is treated here with the same direction: parent <- camera.
+        """
+        path = self.graspgenx_handeye_file
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"Hand-eye matrix not found: {path}")
+        T = np.asarray(np.load(path), dtype=np.float64)
+        if T.shape != (4, 4):
+            raise ValueError(f"Hand-eye matrix must be 4x4, got {T.shape}: {path}")
+        T = T.copy()
+        if self.graspgenx_handeye_translation_unit == "mm":
+            T[:3, 3] /= 1000.0
+        if not np.all(np.isfinite(T)):
+            raise ValueError("Hand-eye matrix contains non-finite values")
+        return T
+
+    def get_base_camera_matrix(self):
+        """Capture T_base_camera at the *current* eye-in-hand observation pose.
+
+        Save the returned matrix before the arm starts moving.  Recomputing it after
+        moving the arm would apply the camera extrinsic at the wrong robot pose.
+        """
+        if self.graspgenx_camera_source == "tf":
+            T_base_camera = self._lookup_transform_matrix(
+                self.base_frame, self.graspgenx_camera_frame
+            )
+        else:
+            T_base_parent = self._lookup_transform_matrix(
+                self.base_frame, self.graspgenx_handeye_parent_frame
+            )
+            T_parent_camera = self._load_handeye_matrix_m()
+            T_base_camera = T_base_parent @ T_parent_camera
+
+        self.logger.info(
+            "Captured T_base_camera: xyz_m="
+            f"{np.round(T_base_camera[:3, 3], 5).tolist()} "
+            f"source={self.graspgenx_camera_source}"
+        )
+        return T_base_camera
+
+    def _load_graspgenx_candidates(self, candidate_file=None):
+        path = os.path.expanduser(candidate_file or self.graspgenx_candidate_file)
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"GraspGenX candidate file not found: {path}")
+        data = np.load(path, allow_pickle=False)
+        if "grasp_poses" not in data or "scores" not in data:
+            raise ValueError(
+                f"{path} must contain grasp_poses and scores arrays"
+            )
+        grasps = np.asarray(data["grasp_poses"], dtype=np.float64)
+        scores = np.asarray(data["scores"], dtype=np.float64).reshape(-1)
+        if grasps.ndim != 3 or grasps.shape[1:] != (4, 4):
+            raise ValueError(f"grasp_poses must have shape (N,4,4), got {grasps.shape}")
+        if len(grasps) != len(scores):
+            raise ValueError(
+                f"grasp_poses/scores length mismatch: {len(grasps)} vs {len(scores)}"
+            )
+        if len(grasps) == 0:
+            raise RuntimeError("GraspGenX returned zero final grasp candidates")
+        if not np.all(np.isfinite(grasps)) or not np.all(np.isfinite(scores)):
+            raise ValueError("GraspGenX candidate file contains non-finite values")
+        order = np.argsort(scores)[::-1]
+        return path, grasps[order], scores[order]
+
+    def _tool_to_eef_matrix(self):
+        """Return T_tool_eef from the robot's fixed TF chain."""
+        return self._lookup_transform_matrix(
+            self.graspgenx_tool_frame, self.eef_link
+        )
+
+    def _prepare_grasp_candidate(self, T_base_camera, T_camera_grasp):
+        """Convert one GraspGenX camera-frame pose into MoveIt eef targets.
+
+        Convention:
+          T_base_grasp = T_base_camera @ T_camera_grasp
+          T_base_tool  = T_base_grasp  @ T_grasp_tool
+          T_base_eef   = T_base_tool   @ T_tool_eef
+
+        GraspGenX's own end-to-end examples use the same explicit
+        grasp-frame -> robot-tool fixed transform concept.
+        """
+        T_base_camera = np.asarray(T_base_camera, dtype=np.float64).reshape(4, 4)
+        T_camera_grasp = np.asarray(T_camera_grasp, dtype=np.float64).reshape(4, 4)
+        T_tool_eef = self._tool_to_eef_matrix()
+
+        T_base_grasp = T_base_camera @ T_camera_grasp
+        T_base_tool = T_base_grasp @ self.graspgenx_T_grasp_tool
+        T_base_eef = T_base_tool @ T_tool_eef
+
+        d = self.graspgenx_pregrasp_distance_mm / 1000.0
+        if self.graspgenx_pregrasp_mode == "tool0_z":
+            # Literal requested behavior: move 100 mm on the selected robot tool
+            # frame's local -Z, even when MoveIt's eef_link itself is link_6.
+            T_base_tool_pre = T_base_tool @ self._translation_matrix_m(z=-d)
+            T_base_eef_pre = T_base_tool_pre @ T_tool_eef
+        else:
+            # Canonical GraspGenX +Z is the approach axis; pregrasp is -Z.
+            T_base_grasp_pre = T_base_grasp @ self._translation_matrix_m(z=-d)
+            T_base_tool_pre = T_base_grasp_pre @ self.graspgenx_T_grasp_tool
+            T_base_eef_pre = T_base_tool_pre @ T_tool_eef
+
+        return {
+            "T_base_grasp": T_base_grasp,
+            "T_base_tool": T_base_tool,
+            "T_base_eef": T_base_eef,
+            "T_base_eef_pre": T_base_eef_pre,
+            "grasp_pose6": self._matrix_m_to_pose6(T_base_eef),
+            "pregrasp_pose6": self._matrix_m_to_pose6(T_base_eef_pre),
+        }
+
+    def preview_graspgenx_candidates(
+        self,
+        T_base_camera,
+        candidate_file=None,
+        max_candidates=None,
+    ):
+        """Convert/sort candidate poses without moving the robot."""
+        path, grasps, scores = self._load_graspgenx_candidates(candidate_file)
+        limit = min(
+            len(grasps),
+            int(max_candidates or self.graspgenx_max_candidates),
+        )
+        prepared = []
+        for index in range(limit):
+            item = self._prepare_grasp_candidate(T_base_camera, grasps[index])
+            item["rank"] = index
+            item["score"] = float(scores[index])
+            item["T_camera_grasp"] = grasps[index]
+            prepared.append(item)
+            self.logger.info(
+                f"[GRASP PREVIEW] #{index:02d} score={scores[index]:.4f} "
+                f"pre={np.round(item['pregrasp_pose6'], 3).tolist()} "
+                f"grasp={np.round(item['grasp_pose6'], 3).tolist()}"
+            )
+        self.logger.info(f"Loaded {len(grasps)} grasps from {path}; previewed {limit}")
+        return prepared
+
+    def _target_exclusion_from_complete_pc(self, T_base_camera, pc_file=None):
+        """Return object center/radius in base mm from FoundationPose full object PC."""
+        path = os.path.expanduser(pc_file or self.graspgenx_complete_pc_file)
+        if not os.path.isfile(path):
+            raise FileNotFoundError(f"Complete object point cloud not found: {path}")
+        pc = np.asarray(np.load(path), dtype=np.float64)
+        if pc.ndim != 2 or pc.shape[1] != 3 or len(pc) < 10:
+            raise ValueError(f"complete object PC must be (N,3), got {pc.shape}")
+        pc = pc[np.all(np.isfinite(pc), axis=1)]
+        if len(pc) < 10:
+            raise ValueError("complete object PC has too few finite points")
+        R = T_base_camera[:3, :3]
+        t = T_base_camera[:3, 3]
+        pc_base = (R @ pc.T).T + t
+        pmin = pc_base.min(axis=0)
+        pmax = pc_base.max(axis=0)
+        center = 0.5 * (pmin + pmax)
+        radius_m = 0.5 * float(np.linalg.norm(pmax - pmin))
+        radius_mm = radius_m * 1000.0 + self.graspgenx_exclusion_margin_mm
+        radius_mm = min(
+            max(radius_mm, self.graspgenx_min_exclusion_radius_mm),
+            self.graspgenx_max_exclusion_radius_mm,
+        )
+        return center * 1000.0, radius_mm
+
+    def _assert_graspgenx_execution_validated(self):
+        problems = []
+        if not self.graspgenx_execution_enabled:
+            problems.append("graspgenx.execution_enabled=false")
+        if not self.graspgenx_camera_extrinsics_validated:
+            problems.append("camera_extrinsics.validated=false")
+        if not self.graspgenx_grasp_to_tool_validated:
+            problems.append("grasp_to_tool.validated=false")
+        if problems:
+            raise RuntimeError(
+                "Real GraspGenX execution is locked until frame calibration is "
+                "validated: " + ", ".join(problems)
+            )
+
+    def pick_graspgenx_candidates(
+        self,
+        component_name,
+        T_base_camera,
+        candidate_file=None,
+        complete_object_pc=None,
+        max_candidates=None,
+        vel=80,
+        acc=160,
+        dry_run=False,
+    ):
+        """Pick using score-sorted GraspGenX 6D candidates.
+
+        dry_run=True performs all frame conversions and prints targets but never
+        opens/moves/closes the real gripper.  Real execution is additionally gated
+        by three YAML validation flags.
+        """
+        candidates = self.preview_graspgenx_candidates(
+            T_base_camera,
+            candidate_file=candidate_file,
+            max_candidates=max_candidates,
+        )
+        if dry_run:
+            self.logger.warning(
+                "GraspGenX dry-run: no robot/gripper command was executed."
+            )
+            return False
+
+        self._assert_graspgenx_execution_validated()
+
+        params = self.grasp_params.get(
+            component_name, self.grasp_params["_default"]
+        )
+        open_width = params["width"]
+        grip_force = params["force"]
+
+        if self.octomap_enabled:
+            center_mm, radius_mm = self._target_exclusion_from_complete_pc(
+                np.asarray(T_base_camera, dtype=np.float64).reshape(4, 4),
+                complete_object_pc,
+            )
+            self.logger.info(
+                "FoundationPose target OctoMap exclusion: "
+                f"center_mm={np.round(center_mm, 2).tolist()}, "
+                f"radius_mm={radius_mm:.1f}"
+            )
+            self.set_octomap_exclusion(center_mm, radius_mm)
+            self.clear_octomap()
+            time.sleep(self.octomap_rescan_settle_sec)
+
+        try:
+            for candidate in candidates:
+                rank = candidate["rank"]
+                score = candidate["score"]
+                pre = candidate["pregrasp_pose6"]
+                grasp = candidate["grasp_pose6"]
+
+                self.logger.info(
+                    f"[GRASP] trying candidate #{rank} score={score:.4f}"
+                )
+
+                self.rg.move_gripper(open_width, force_val=grip_force)
+                time.sleep(1.0)
+
+                # Collision-aware free-space path to the 100 mm pregrasp.
+                self.move_pose(pre)
+                time.sleep(0.3)
+
+                # Straight approach from pregrasp to the selected 6D grasp.
+                self.move_linear(grasp, vel=vel, acc=acc, avoid_collisions=True)
+
+                self.rg.close_gripper(force_val=grip_force)
+                time.sleep(2.0)
+
+                # Retreat on exactly the reverse pregrasp geometry.  The held target
+                # is intentionally ignored for this short retreat.
+                self.move_linear(pre, vel=vel, acc=acc, avoid_collisions=False)
+                time.sleep(0.5)
+
+                status = self.rg.get_status()
+                grip_detected = bool(status[1])
+                self.logger.info(
+                    f"[GRASP] candidate #{rank}: gripper_status={status}, "
+                    f"detected={grip_detected}"
+                )
+                if grip_detected:
+                    return True
+
+                # The motion was valid but the physical grasp did not hold; try
+                # the next *different* GraspGenX candidate rather than repeating
+                # the same pose five times.
+                self.rg.move_gripper(open_width, force_val=grip_force)
+                time.sleep(0.5)
+
+            self.logger.error(
+                f"No physical grasp succeeded among {len(candidates)} candidates"
+            )
+            return False
+        finally:
+            self.clear_octomap_exclusion()
+
+    # ------------------------------------------------------------------
     # High-level pick/place API kept identical to old Motion
     # ------------------------------------------------------------------
 
@@ -1691,14 +3286,9 @@ class Motion:
             f"force={grip_force}, approach={approach_height}"
         )
 
-        # ACM은 그리퍼 링크만 옥토맵과 충돌 면제해서, 손목/팔뚝이 접근하는
-        # 경로까지는 못 풀어준다 — 그래서 이 물체의 YOLO 마스크에 해당하는
-        # depth 포인트는 옥토맵에 애초에 들어가지 않도록 걸러낸다(부분 삭제
-        # API가 없어서, 한 번 voxel로 박히면 clear_octomap()으로 맵 전체를
-        # 비우는 수밖에 없고, 그건 키팅 트레이 지도까지 같이 날린다).
-        # Controller가 move_to_observation_pose() 전에 이미 걸어뒀어야 첫
-        # 프레임부터 효과가 있다 — 여기서 또 거는 건 그게 빠졌을 때의 안전망.
-        self.set_octomap_exclusion_component(component_name)
+        # Static map policy: do not clear, carve, or rebuild the OctoMap during
+        # normal picks. MoveIt only reads the map created at initial inspection.
+        self.set_octomap_mapping(False)
 
         try:
             for attempt_index in range(5):
@@ -1748,6 +3338,10 @@ class Motion:
         # PLACE 목표 위치보다 Z 방향으로 approach_height만큼 높은 안전 위치.
         place_pose_up = place_pose_down.copy()
         place_pose_up[2] += approach_height
+
+        # Static map policy: place uses the already-frozen environment map.
+        # Do not revisit inspection_pose just to rebuild occupancy.
+        self.set_octomap_mapping(False)
 
         # ---------------------------------------------------------
         # PLACE 좌표 확인
