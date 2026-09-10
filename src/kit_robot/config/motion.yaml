@@ -116,17 +116,18 @@ motion:
       joint_acceleration_scale: 0.15
 
     observation_pose:
-      # 홈 자세와 같은 값이다 — 관찰·octomap 촬영을 홈에서 한다. joint 타입이라
-      # MoveIt 에 JointConstraint 로 그대로 들어간다(IK·쿼터니언 변환 없음).
-      # 별도 항목으로 남겨둔 건 관찰 자세만 따로 재조정할 여지를 두기 위해서다.
-      type: "joint"
-      pos: [0.0, 0.0, 90.0, 0.0, 90.0, 0.0]
-
-      joint_vel: 30.0
-      joint_acc: 60.0
+      # [x_mm, y_mm, z_mm, A_deg, B_deg, C_deg]
+      # A/B/C는 기존 Doosan posx와 같은 intrinsic ZYZ Euler.
+      # motion.py의 move_pose()에서 quaternion으로 변환한 뒤
+      # MoveIt OrientationConstraint에 전달한다.
+      type: "cartesian"
+      pos: [317.820, 4.010, 605.280, 177.73, 179.26, 178.08]
 
       joint_velocity_scale: 0.15
       joint_acceleration_scale: 0.15
+
+      position_tolerance_mm: 2.0
+      orientation_tolerance_deg: 2.0
 
     inspection_pose:
       type: "cartesian"

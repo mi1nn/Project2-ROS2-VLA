@@ -1263,7 +1263,10 @@ class Motion:
         return self._move_named_position("home")
 
     def move_to_observation_pose(self):
-        # observation_pose 는 홈 자세와 같은 joint 값이다(motion.yaml).
+        # observation_pose는 motion.yaml의 Cartesian [x,y,z,A,B,C] 목표다.
+        # A/B/C는 intrinsic ZYZ Euler로 저장하고, _move_named_position()
+        # -> move_pose() -> _pose6_to_ros_pose()에서 quaternion으로 변환해
+        # MoveIt pose goal로 전달한다.
         #
         # 게이트 요청은 additive — 절대 먼저 지우지 않는다. 작업당 한 번뿐인
         # move_to_inspection_pose() 가 쌓아둔 키팅 트레이 voxel 이 살아남아야
