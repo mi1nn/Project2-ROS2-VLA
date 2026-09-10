@@ -16,7 +16,7 @@ done
 
 wrap_command() {
   local title="$1" command="$2" pane_script
-  printf -v pane_script 'cd %q; source %q; source %q; export ROS_DOMAIN_ID=%q; export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp; printf "\\033]0;%s\\007" %q; %s; status=$?; printf "\\n===== %s exited (%s); shell kept open =====\\n" "$status"; exec %q -l' \
+  printf -v pane_script 'cd %q; source %q; source %q; export ROS_DOMAIN_ID=%q; export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp; printf "\\033]0;%s\\007" %q; %s; status=$?; printf "\\n===== %s exited (%%s); shell kept open =====\\n" "$status"; exec %q -l' \
     "$PROJECT_DIR" "$ROS_SETUP" "$WORKSPACE_SETUP" "${ROS_DOMAIN_ID:-20}" \
     "$title" "$title" "$command" "$title" "${SHELL:-/bin/bash}"
   printf 'bash -lc %q' "$pane_script"
