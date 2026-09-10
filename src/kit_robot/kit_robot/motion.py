@@ -1151,15 +1151,6 @@ class Motion:
             return False
 
         enabled = bool(enabled)
-<<<<<<< HEAD
-        if enabled and self._octomap_frozen:
-            # 지도 확정 후에는 어떤 호출자가 열려고 해도 열지 않는다. 닫는
-            # 방향(False)은 그대로 통과 — 이미 닫혀 있어 사실상 무해하다.
-            self.logger.info(
-                "Octomap 확정 상태라 게이트를 다시 열지 않는다",
-                throttle_duration_sec=10.0,
-            )
-=======
 
         if (
             enabled
@@ -1167,7 +1158,6 @@ class Motion:
             and not force
         ):
             self._octomap_mapping = False
->>>>>>> 880445f5e4eee24b85be0cbe1b6736a3f2e691ee
             return False
 
         if enabled != self._octomap_mapping:
@@ -1184,15 +1174,6 @@ class Motion:
         if not self.octomap_enabled:
             return False
 
-<<<<<<< HEAD
-        if self._octomap_frozen:
-            # 확정된 지도를 지우면 그 뒤 구간이 장애물 없는 빈 지도로 계획한다.
-            # 다시 채울 촬영 기회가 없으므로(작업당 2회로 끝) 거부한다.
-            self.logger.info("Octomap 확정 상태라 clear 요청을 무시한다")
-            return False
-
-        future = self._clear_octomap_client.call_async(Empty.Request())
-=======
         if (
             self._static_octomap_frozen
             and not force
@@ -1202,7 +1183,6 @@ class Motion:
         future = self._clear_octomap_client.call_async(
             Empty.Request()
         )
->>>>>>> 880445f5e4eee24b85be0cbe1b6736a3f2e691ee
         try:
             self._wait_future(
                 future,
@@ -1218,17 +1198,6 @@ class Motion:
         self.logger.info("Octomap cleared")
         return True
 
-<<<<<<< HEAD
-    def prepare_octomap_for_new_task(self):
-        """Clear an old task's map before waiting for its next command."""
-        if not self.octomap_enabled:
-            return True
-
-        # Stop the relay first: wakeword/STT can keep the command pending.
-        self._octomap_frozen = False
-        self.set_octomap_mapping(False)
-        return self.clear_octomap()
-=======
     def start_static_octomap_scan(self):
         """Move to inspection_pose and open the only map-building window."""
         if not self.octomap_enabled:
@@ -1331,7 +1300,6 @@ class Motion:
         )
 
         return True
->>>>>>> 880445f5e4eee24b85be0cbe1b6736a3f2e691ee
 
     def _allow_octomap_collisions(self):
         """Excuse the gripper links from octomap collisions, once, at startup.
@@ -1575,100 +1543,6 @@ class Motion:
         return self._move_named_position("home")
 
     def move_to_observation_pose(self):
-<<<<<<< HEAD
-        # observation_pose는 motion.yaml의 Cartesian [x,y,z,A,B,C] 목표다.
-        # A/B/C는 intrinsic ZYZ Euler로 저장하고, _move_named_position()
-        # -> move_pose() -> _pose6_to_ros_pose()에서 quaternion으로 변환해
-        # MoveIt pose goal로 전달한다.
-        #
-        # 게이트 요청은 additive — 절대 먼저 지우지 않는다. 작업당 한 번뿐인
-        # move_to_inspection_pose() 가 쌓아둔 키팅 트레이 voxel 이 살아남아야
-        # 컴포넌트 2번 이후에도 "트레이 피하기"가 동작한다.
-        #
-        # 키팅 트레이 스캔 직후 Controller 가 freeze_octomap() 을 걸어두므로
-        # 여기서 부르는 set_octomap_mapping(True) 는 실제로는 항상 무시된다 —
-        # 관찰 자세에서는 새 voxel 을 쌓지 않는다.
-        #
-        # ponytail: a picked-up object leaves a ghost voxel behind (occupancy
-        # only grows without an explicit clear), which can make a since-cleared
-        # spot on the pick tray look blocked. Fails safe (overly cautious, not
-        # collision-prone). If that starts blocking real plans, clear just the
-        # vacated grasp footprint here instead of reintroducing a full clear.
-        result = self._move_named_position("observation_pose")
-        self._wait_for_exclusion_mask()
-        self.set_octomap_mapping(True)
-        return result
-
-    def freeze_octomap(self):
-        """Seal the map: no more accumulation, no more clearing, for this task.
-
-        Called once per task by Controller right after the single seeding
-        scan (the keating tray at inspection_pose). Every later move —
-        observation, pick, place, final inspection — plans against exactly
-        this map. Freezing rather than just closing the gate matters because
-        several call sites (`move_to_observation_pose`,
-        `move_to_inspection_pose`) reopen the gate on their own; the flag is
-        what stops all of them at once.
-        """
-        if not self.octomap_enabled:
-            return False
-
-        self.set_octomap_mapping(False)
-        self._octomap_frozen = True
-        self.logger.info("Octomap 확정: 이후 촬영·삭제 없이 이 지도만 사용한다")
-        return True
-
-    def _wait_for_exclusion_mask(self, timeout_sec=2.0):
-        """예외 걸린 컴포넌트가 있으면, 그 클래스의 첫 YOLO 탐지가 도착할 때까지
-        게이트를 열지 않고 기다린다.
-
-        게이트를 먼저 열고 마스크를 기다리면, 그 사이 들어오는 프레임은
-        무필터로 중계되어 그 물체의 voxel 이 그대로 박힌다 — 부분 삭제
-        API가 없어서 한 번 박히면 이번 관찰에서는 영영 못 뺀다. timeout
-        안에 안 와도 mapping 상태는 열어 두되, cloud callback이 새 마스크가
-        없는 프레임을 버린다. 감지 실패가 대상 물체 voxel을 만들지는 않는다.
-        """
-        component = self._octomap_exclusion_component
-        if component is None:
-            return
-        deadline = time.monotonic() + timeout_sec
-        while not Motion._has_fresh_exclusion_mask(self):
-            if time.monotonic() >= deadline:
-                self.logger.warn(
-                    f"옥토맵 예외 대기 타임아웃({timeout_sec}s): "
-                    f"component={component} 새 탐지가 없음; 해당 cloud는 계속 버림"
-                )
-                return
-            time.sleep(0.05)
-
-    def move_to_inspection_pose(self, clear_before=False):
-        # Clearing refresh: used once per task by Controller (before the first
-        # observation, to seed the place-area map) and once more at the very end
-        # (final inspection). The end-of-task call keeps moving against the
-        # *current* map (clear_before=False) — those voxels are this task's own
-        # placed components, still real obstacles for that move.
-        #
-        # The once-per-task first call is different: it's the very first move
-        # of a brand new task, and the map it would otherwise plan against is
-        # whatever the *previous* task's octomap left behind (a failed pick,
-        # a picked-up ghost voxel, ...) — garbage this task never built and
-        # has no way to know about. Clearing before that move, not just after,
-        # is what actually fixes "새 작업인데 이전 작업 octomap 때문에 여기로
-        # 못 움직임": otherwise the plan to inspection_pose can be blocked by
-        # stale voxels that clear_octomap() only wipes *after* the move already
-        # failed. Safe to clear first here — the gate is closed for the whole
-        # move (see move_joint), so nothing new bakes in between.
-        if clear_before:
-            # clear_before 는 "새 작업의 첫 이동" 신호다 — 지난 작업이 확정해
-            # 잠가둔 지도를 여기서 풀어야 이번 작업 지도를 새로 쌓을 수 있다.
-            # 푸는 게 먼저다: 잠긴 상태에서는 clear_octomap() 이 거부된다.
-            self._octomap_frozen = False
-            self.clear_octomap()
-        result = self._move_named_position("inspection_pose")
-        self.clear_octomap()
-        self.set_octomap_mapping(True)
-        return result
-=======
         # Static map is read-only. Observation changes only the robot pose.
         self.set_octomap_mapping(False)
         return self._move_named_position("observation_pose")
@@ -1682,7 +1556,6 @@ class Motion:
 
         self.set_octomap_mapping(False)
         return self._move_named_position("inspection_pose")
->>>>>>> 880445f5e4eee24b85be0cbe1b6736a3f2e691ee
 
     # ------------------------------------------------------------------
     # Current TCP pose: keep old DSR posx-compatible mm + ZYZ-degree format
