@@ -13,7 +13,7 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-        # T_gripper2camera.npy(Day 3)/grasp_params.json(Day 8)이 여기로 들어온다.
+        # Install calibration and grasp parameter files.
         (os.path.join('share', package_name, 'resource'), glob('resource/*')),
         (os.path.join("share", package_name, "config"),glob("config/*.yaml")),
     ],
@@ -21,8 +21,8 @@ setup(
     zip_safe=True,
     maintainer='min',
     maintainer_email='alekdi8gm30@gmail.com',
-    description='TODO: Package description',
-    license='TODO: License declaration',
+    description='ROS 2 motion and perception controller for relief kit assembly',
+    license='Apache-2.0',
     extras_require={
         'test': [
             'pytest',
@@ -32,7 +32,6 @@ setup(
         'console_scripts': [
             'controller = kit_robot.controller:main',
             'position_estimation = kit_robot.position_estimation:main',
-            'motion_test = kit_robot.motion_test:main',
         ],
     },
 )
