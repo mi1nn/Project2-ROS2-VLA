@@ -268,7 +268,7 @@ cd FoundationPose
 ```  
 
 #### 2. Pretrained Weights
-다음 구조가 되도록 FoundationPose 공식 github에서 weights를 준비합니다.
+다음 구조가 되도록 FoundationPose 공식 github에서 weights를 준비합니다.  
 https://github.com/NVlabs/FoundationPose
 ```bash
 FoundationPose/
@@ -343,11 +343,110 @@ bash build_all.sh
 import mycpp
 ```
 
-#### 8. Worker
+#### 8. Run
 ```bash
 cd /home/rokey/FoundationPose
 conda activate my
 python foundation_pose_worker.py
+```
+
+### 2. GraspGenX
+
+#### 1. uv install
+```bash
+cd ~
+git clone https://github.com/NVlabs/GraspGenX.git
+cd ~/GraspGenX
+```
+
+#### 2. environment
+1. python 3.10
+```bash
+cd ~/GraspGenX
+rm -rf .venv
+
+uv python install 3.10
+uv venv --python 3.10 .venv
+source .venv/bin/activate
+uv pip install -e .
+```
+
+2. Git LFS
+```bash
+sudo apt update
+sudo apt install -y git-lfs
+git lfs install
+```
+
+3. Gripper Assets
+```bash
+cd ~/GraspGenX
+source .venv/bin/activate
+python -c \
+"from graspgenx import get_gripper_descriptions_root; print(get_gripper_descriptions_root())"
+```
+
+4. Dependency
+```bash
+source .venv/bin/activate
+uv pip install \
+  pyzmq \
+  msgpack \
+  msgpack-numpy
+```
+
+#### 3. Run
+```bash
+cd ~/GraspGenX
+source .venv/bin/activate
+
+python client-server/graspgenx_server.py \
+  --config ext/graspgenx_checkpoints/release \
+  --assets_dir assets \
+  --default_gripper onrobot_RG2 \
+  --port 5556
+```
+
+### 3. Pipeline Setup
+
+#### 1. venv
+```bash
+.venv_perception
+python3 -m venv \
+  --system-site-packages \
+  .venv_perception
+```
+
+```bash
+source .venv_perception/bin/activate
+python -m pip install --upgrade pip
+```
+
+#### 2. dependency
+```bash
+python -m pip install \
+  pyzmq \
+  msgpack \
+  msgpack-numpy \
+  scipy
+```
+
+#### 3. Run
+realsense가 실행된 이후에 실행되어야 한다.
+```bash
+cd ~/Project2-ROS2-VLA
+source /opt/ros/jazzy/setup.bash
+source install/setup.bash
+source .venv_perception/bin/activate
+```
+
+```bash
+source /opt/ros/jazzy/setup.bash
+
+ros2 launch realsense2_camera rs_launch.py \
+  align_depth.enable:=true \
+  pointcloud.enable:=true
+```
 
 
 
