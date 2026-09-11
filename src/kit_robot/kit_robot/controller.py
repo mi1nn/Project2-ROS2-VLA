@@ -271,16 +271,7 @@ class Controller(Node):
         request.task_id = self.task_id
 
         try:
-<<<<<<< HEAD
-            # 요청을 비동기로 전송
-            if not self.motion.prepare_octomap_for_new_task():
-                raise RuntimeError("ClearOctomap failed")
-            self.pending_future = self.command_client.call_async(
-                request
-            )
-=======
             self.pending_future = self.command_client.call_async(request)
->>>>>>> 2972017cf8d0bb2a6c34e9d37283c111b28274eb
         except Exception as error:
             code = "command_request_failed"
             detail = str(error)
