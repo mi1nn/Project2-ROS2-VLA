@@ -104,6 +104,81 @@
 
 현재 배치 슬롯은 `slot_1`부터 `slot_6`까지 6개입니다.
 
+## 학습 모델
+
+비전 노드는 `src/kit_vision/resource/best.pt`에 저장된 **YOLO26s-seg 파인튜닝 모델**을 사용합니다.
+
+### 1차 학습
+
+공개 데이터 기반의 원본·Crop 혼합 데이터로 9개 품목의 기본 특징을 학습했습니다. 이 단계에서 생성한 `best.pt`는 2차 파인튜닝의 초기 가중치로 사용했습니다.
+
+| 데이터 분할 | 이미지 수 |
+|Hakshu| ---: |
+| Train | 19,382 |
+| Validation | 2,418 |
+| Test | 1,612 |
+| **합계** | **23,412** |
+
+- 모델: YOLO26s-seg
+- 입력 크기: `640`
+- 역할: 2차 파인튜닝을 위한 초기 가중치 생성
+
+### 2차 파인튜닝 · 현재 사용 모델
+
+1차 학습의 `best.pt`를 기반으로, 실제 작업 환경에서 직접 촬영하고 어노테이션한 데이터 159장에 추가 학습했습니다. 현장 카메라의 촬영 구도, 조명과 물체 외관에 모델을 적응시키는 것이 목적입니다.
+
+| 데이터 분할 | 이미지 수 |
+| --- | ---: |
+| Train | 127 |
+| Validation | 16 |
+| Test | 16 |
+| **합계** | **159** |
+
+#### 학습 설정
+
+| 항목 | 설정 |
+| --- | --- |
+| 모델 | YOLO26s-seg |
+| Ultralytics | 8.4.140 |
+| 입력 크기 | `imgsz=640` |
+| 배치 | `batch=32` |
+| GPU | 2개 |
+| 목표 epoch | 300 |
+| 기록 epoch | 69 |
+| Early Stopping | `patience=30` |
+| 최적 모델 | **39 epoch의 `best.pt`** |
+| 모델 크기 | 약 23.34 MB |
+
+#### 파인튜닝 모델 성능
+
+| 지표 | Box | Mask |
+| --- | ---: | ---: |
+| Precision | 97.737% | **98.520%** |
+| Recall | 96.349% | **96.906%** |
+| mAP50 | 99.021% | **99.032%** |
+| mAP50-95 | 94.780% | **91.146%** |
+
+위 결과는 Validation 데이터의 319개 객체를 대상으로 측정했습니다. 객체 검출·분할 성능이며 실제 로봇의 파지 성공률을 의미하지 않습니다.
+
+<p align="center">
+  <img src="image/yolo_finetune_mask_pr_curve.png"
+       width="760"
+       alt="파인튜닝 모델의 Mask Precision-Recall 곡선">
+</p>
+
+<p align="center">
+  <sub>파인튜닝 모델의 클래스별 Mask Precision–Recall 곡선 · 전체 Mask mAP50 약 0.990</sub>
+</p>
+
+<details>
+<summary><strong>파인튜닝 학습 추이 보기</strong></summary>
+
+![파인튜닝 학습 및 검증 추이](image/yolo_finetune_results.png)
+
+39 epoch에서 Box·Mask mAP50-95의 결합 평가 점수가 가장 높았습니다. 이후 30 epoch 동안 최적 점수가 갱신되지 않아 69 epoch에서 조기 종료됐습니다.
+
+</details>
+
 ## 저장소 구성
 
 <details>
