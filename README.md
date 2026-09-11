@@ -1,4 +1,12 @@
 # 음성·비전 기반 재난 구조키트 자동 구성 시스템
+<p align="center">
+  <img alt="Ubuntu" src="https://img.shields.io/badge/Ubuntu-24.04-E95420?logo=ubuntu&logoColor=white">
+  <img alt="ROS 2" src="https://img.shields.io/badge/ROS_2-Jazzy-22314E?logo=ros&logoColor=white">
+  <img alt="Host Python" src="https://img.shields.io/badge/Host_Python-3.12-3776AB?logo=python&logoColor=white">
+  <img alt="Docker" src="https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white">
+  <img alt="NVIDIA GPU" src="https://img.shields.io/badge/NVIDIA-GPU_required-76B900?logo=nvidia&logoColor=white">
+  <img alt="License" src="https://img.shields.io/badge/License-Apache_2.0-D22128">
+</p>
 
 사용자의 음성 명령을 해석하고 RGB-D 영상에서 물품을 인식하여 **Doosan M0609 협동로봇과 OnRobot RG2 그리퍼로 구조키트를 구성하는 ROS 2 프로젝트**입니다.
 
@@ -7,69 +15,52 @@
 
 ## 주요 기능
 
-- **음성 작업 지시:**  
-  ◦ `hello rokey` 웨이크워드 감지 후 Whisper STT와 GPT-4o로 명령을 구조화하고 지원 품목·수량을 검증합니다.  
+- **음성 작업 지시:**
+  - `hello rokey` 웨이크워드 감지 후 Whisper STT와 GPT-4o로 명령을 구조화하고 지원 품목·수량을 검증합니다.
+      
+- **객체 탐지:**
+  - YOLO26s-seg 모델 기반 객체 탐지와 클래스·마스크·중심점을 얻습니다.
+  - mask 내부 유효 depth의 중위값으로 카메라 기준 3D 좌표를 계산합니다.
+      
   
-- **객체 탐지:**  
-  ◦ YOLO26s-seg 모델 기반 객체 탐지와 클래스·마스크·중심점을 얻습니다.  
-  ◦ mask 내부 유효 depth의 중위값으로 카메라 기준 3D 좌표를 계산합니다.  
-  
-- **품목 파지:**  
-  ◦ mesh가 없는 경우
+- **품목 파지:**
+  - mesh가 없는 경우
     - Hand–Eye 보정 행렬과 로봇 자세로 3D 좌표를 변환하고 offset 거리만큼 접근하여 파지를 진행합니다.
       
-  ◦ mesh가 있는 경우  
+  - mesh가 있는 경우  
     - FoundationPose를 사용하여 객체와 mesh를 정렬하여 포즈를 찾습니다.  
     - GraspGenX를 사용하여 객체의 현재 포즈에 따른 5개의 후보 파지 형태를 생성합니다.  
-    - Gripper 후보의 기울기·점수·접근 및 후퇴 경로를 검증하여 파지를 진행합니다.  
+    - Gripper 후보의 기울기·점수·접근 및 후퇴 경로를 검증하여 파지를 진행합니다.
+        
   
 - **충돌 환경 구성:**  
-  ◦ 초기 관측 구간에서 필터링한 PointCloud로 정적 OctoMap을 생성하고 재사용합니다.  
-  ◦ 작업 공간을 별도 keepout box로 설정합니다.  
+  - 초기 관측 구간에서 필터링한 PointCloud로 정적 OctoMap을 생성하고 재사용합니다.  
+  - 작업 공간을 별도 keepout box로 설정합니다.
+      
   
 - **작업 관리:**  
-  ◦ 상태머신을 기반으로 명령 수신부터 객체 관찰, 작업 실행, 결과 검사 및 보고까지 전체 작업 흐름을 단계적으로 제어합니다.  
+  - 명령 수신, 객체 관찰, 작업 실행, 결과 검사 및 보고를 상태머신으로 제어합니다.
+      
   
 - **이력·재고 관리:**  
-  ◦ MongoDB에 명령과 실행 결과를 기록합니다.  
-  ◦ PostgreSQL에서 품목과 재고를 관리합니다.  
+  - MongoDB에 명령과 실행 결과를 기록합니다.  
+  - PostgreSQL에서 품목과 재고를 관리합니다.
+      
   
 ## 시스템 구성  
   
-```mermaid
-flowchart TD
-    V[음성 입력 · STT · LLM] --> C[Controller · 명령 검증]
-    R[RealSense RGB-D] --> Y[YOLO Segmentation]
-    Y --> P[좌표 추정 · 구성품 검사]
-    P <--> C
-    C --> B{파지 대상}
-    B -->|일반 품목| M[MoveIt 2 · M0609 · RG2]
-    B -->|컵라면| G[외부 FoundationPose · GraspGenX]
-    G -->|후보 파일 · 응답| M
-    R --> O[정적 OctoMap]
-    O --> M
-    M -->|실행 결과| C
-    V --> D[DB 노드]
-    C --> D
-    D --> PG[PostgreSQL · 품목 및 재고]
-    D --> MG[MongoDB · 명령 및 실행 이력]
-```
+![시스템 구성도](image/kit_flow_1_infra.png)
+
+일반 품목은 YOLO 기반 좌표 추정을 사용하고, 컵라면은 외부 FoundationPose·GraspGenX 파이프라인의 후보를 사용합니다. 실패 유형에 따라 재관찰·재시도하거나 작업을 종료합니다.
+
+<details>
+<summary><strong>작업 상태 흐름 보기</strong></summary>
+
+![작업 상태머신](image/kit_flow_2_statemachine.png)
+
+</details>  
   
-### 작업 흐름  
-  
-| 상태 | 역할 |
-| --- | --- |
-| `IDLE` | 작업 ID와 실행 상태 초기화 |
-| `LISTEN` | 음성 명령 요청 및 응답 대기 |
-| `VALIDATE` | 명령 검증, 구성품 목록과 슬롯 할당 |
-| `OBSERVE` | 관찰 자세 이동 및 파지 준비 |
-| `EXECUTE` | 품목별 파지 경로 실행 후 지정 슬롯 배치 |
-| `INSPECT` | 기대 품목·수량과 검출 결과 비교 |
-| `REPORT` | 결과 발행, 복귀 및 재시작 여부 판단 |
-  
-일반 품목은 YOLO 기반 좌표 추정을 사용하고, 컵라면은 외부 인식 서비스의 후보를 사용합니다. 실패 종류에 따라 재관찰·재시도하거나 작업을 종료합니다.  
-  
-## 기술 및 실행 환경  
+## 기술 스택
   
 | 구분 | 구성 |
 | --- | --- |
@@ -78,12 +69,12 @@ flowchart TD
 | 카메라 | RealSense RGB-D, 컬러 정렬 depth 및 PointCloud2 |
 | 비전 | Ultralytics YOLO Segmentation, PyTorch, OpenCV |
 | 음성 / 언어 | openWakeWord, Whisper API, GPT-4o, LangChain |
-| 로봇 계획 | MoveIt 2, OMPL, 기본 설정 RRTConnect, KDL IK |
+| 로봇 계획 | MoveIt 2, OMPL, RRTConnect, KDL IK |
 | 장애물 표현 | OctoMap, Planning Scene collision object |
 | 데이터베이스 | PostgreSQL 16 / MongoDB 7 |
 | 컨테이너 | Docker Compose, NVIDIA GPU 기반 비전 추론 |
   
-카메라·로봇·음성·좌표 추정·DB 노드는 호스트에서 실행하고, YOLO 추론과 DB 서버는 Compose로 실행하는 구성을 제공합니다. 컵라면 외부 인식 서버는 별도 준비가 필요합니다.  
+카메라·로봇·음성·좌표 추정·DB 노드는 호스트에서 실행하고, YOLO 추론과 DB 서버는 Compose로 실행하는 구성을 제공합니다. 컵라면 인식에는 FoundationPose와 GraspGenX 환경이 별도로 필요합니다.
   
 ## 지원 품목 및 레시피
   
@@ -110,6 +101,9 @@ flowchart TD
 
 ## 저장소 구성
 
+<details>
+<summary><strong>디렉터리별 역할 보기</strong></summary>
+
 | 경로 | 역할 |
 | --- | --- |
 | `src/kit_voice/` | 웨이크워드, STT, LLM, 명령 서비스 |
@@ -122,6 +116,8 @@ flowchart TD
 | `scripts/` | 통합 실행과 비전 디버그 실행 스크립트 |
 | `docs/` | 설계, 인터페이스, DB 및 실행 관련 문서 |
 | `compose.yaml` | DB 서버와 비전 컨테이너 구성 |
+
+</details>
 
 ## 설치 및 준비
 
@@ -432,7 +428,7 @@ python -m pip install \
 ```
 
 #### 3. Run
-realsense가 실행된 이후에 실행되어야 한다.
+realsense가 실행된 이후에 실행되어야 합니다.
 ```bash
 cd ~/Project2-ROS2-VLA
 source /opt/ros/jazzy/setup.bash
@@ -449,8 +445,10 @@ ros2 launch realsense2_camera rs_launch.py \
 ```
 
 
-
 ## 주요 ROS 2 인터페이스
+
+<details>
+<summary><strong>서비스·토픽 목록 보기</strong></summary>
 
 | 구분 | 이름 | 역할 |
 | --- | --- | --- |
@@ -467,9 +465,14 @@ ros2 launch realsense2_camera rs_launch.py \
 
 검출의 `camera_xyz`와 `GetComponentPose`의 위치 값은 **mm**, 자세 각도는 **degree**입니다. 일반 좌표 변환은 Doosan 호환 ZYZ Euler 표현을 사용합니다. MoveIt 내부 메시지의 m·quaternion 표현과 구분합니다.
 
+</details>
+
 ## OctoMap 및 파지 설정
 
 현재 `motion.yaml`의 주요 기본값입니다.
+
+<details>
+<summary><strong>기본 파라미터 보기</strong></summary>
 
 | 항목 | 값 |
 | --- | --- |
@@ -484,6 +487,8 @@ ros2 launch realsense2_camera rs_launch.py \
 | 컵라면 접근 기울기 제한 | 기준 하향축에서 30도 |
 
 voxel 크기는 입력 필터 설정으로 OctoMap 해상도와 구분됩니다. 생성된 맵은 Motion 인스턴스에서 고정하여 작업 간 재사용하며, 디스크에 저장·복원하는 기능을 의미하지 않습니다. 작업 중 환경 변화는 자동 반영되지 않습니다.
+
+</details>
 
 ## 결과 확인 및 현재 한계
 
@@ -511,4 +516,8 @@ ros2 topic echo /kit/component_result
 - [데이터베이스 설계](docs/05-database.md)
 - [DB 운영 방법](infra/README.md)
 
-기존 문서에는 설계 시점의 계획이 포함되어 있으므로 현재 구현 여부는 코드와 함께 확인합니다. 자체 패키지의 라이선스 선언은 아직 TODO 상태이며, 포함된 외부 드라이버·모델·데이터의 이용 조건은 각 출처를 따릅니다.
+일부 문서에는 설계 시점의 계획이 포함되어 있으므로 현재 구현 여부는 코드와 함께 확인합니다.
+
+## 라이선스
+
+저장소 루트의 코드는 [Apache License 2.0](LICENSE)을 따릅니다. 포함된 외부 드라이버·모델·데이터는 각 출처의 이용 조건을 확인하세요.
