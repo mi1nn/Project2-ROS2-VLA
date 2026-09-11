@@ -15,8 +15,13 @@
   ◦ mask 내부 유효 depth의 중위값으로 카메라 기준 3D 좌표를 계산합니다.  
   
 - **품목 파지:**  
-  ◦ mesh가 없는 경우, Hand–Eye 보정 행렬과 로봇 자세로 3D 좌표를 변환하고 offset 거리만큼 접근하여 파지를 진행합니다.  
-  ◦ mesh가 있는 경우, FoundationPose–GraspGenX 파이프라인에 연결하고 Gripper 후보의 기울기·점수·접근 및 후퇴 경로를 검증하여 실행합니다.  
+  ◦ mesh가 없는 경우
+    - Hand–Eye 보정 행렬과 로봇 자세로 3D 좌표를 변환하고 offset 거리만큼 접근하여 파지를 진행합니다.
+      
+  ◦ mesh가 있는 경우  
+    - FoundationPose를 사용하여 객체와 mesh를 정렬하여 포즈를 찾습니다.  
+    - GraspGenX를 사용하여 객체의 현재 포즈에 따른 5개의 후보 파지 형태를 생성합니다.  
+    - Gripper 후보의 기울기·점수·접근 및 후퇴 경로를 검증하여 파지를 진행합니다.  
   
 - **충돌 환경 구성:**  
   ◦ 초기 관측 구간에서 필터링한 PointCloud로 정적 OctoMap을 생성하고 재사용합니다.  
@@ -29,8 +34,8 @@
   ◦ MongoDB에 명령과 실행 결과를 기록합니다.  
   ◦ PostgreSQL에서 품목과 재고를 관리합니다.  
   
-## 시스템 구성
-
+## 시스템 구성  
+  
 ```mermaid
 flowchart TD
     V[음성 입력 · STT · LLM] --> C[Controller · 명령 검증]
@@ -49,9 +54,9 @@ flowchart TD
     D --> PG[PostgreSQL · 품목 및 재고]
     D --> MG[MongoDB · 명령 및 실행 이력]
 ```
-
-### 작업 흐름
-
+  
+### 작업 흐름  
+  
 | 상태 | 역할 |
 | --- | --- |
 | `IDLE` | 작업 ID와 실행 상태 초기화 |
@@ -61,11 +66,11 @@ flowchart TD
 | `EXECUTE` | 품목별 파지 경로 실행 후 지정 슬롯 배치 |
 | `INSPECT` | 기대 품목·수량과 검출 결과 비교 |
 | `REPORT` | 결과 발행, 복귀 및 재시작 여부 판단 |
-
-일반 품목은 YOLO 기반 좌표 추정을 사용하고, 컵라면은 외부 인식 서비스의 후보를 사용합니다. 실패 종류에 따라 재관찰·재시도하거나 작업을 종료합니다.
-
-## 기술 및 실행 환경
-
+  
+일반 품목은 YOLO 기반 좌표 추정을 사용하고, 컵라면은 외부 인식 서비스의 후보를 사용합니다. 실패 종류에 따라 재관찰·재시도하거나 작업을 종료합니다.  
+  
+## 기술 및 실행 환경  
+  
 | 구분 | 구성 |
 | --- | --- |
 | OS / 미들웨어 | Ubuntu 24.04 / ROS 2 Jazzy |
@@ -77,11 +82,11 @@ flowchart TD
 | 장애물 표현 | OctoMap, Planning Scene collision object |
 | 데이터베이스 | PostgreSQL 16 / MongoDB 7 |
 | 컨테이너 | Docker Compose, NVIDIA GPU 기반 비전 추론 |
-
-카메라·로봇·음성·좌표 추정·DB 노드는 호스트에서 실행하고, YOLO 추론과 DB 서버는 Compose로 실행하는 구성을 제공합니다. 컵라면 외부 인식 서버는 별도 준비가 필요합니다.
-
+  
+카메라·로봇·음성·좌표 추정·DB 노드는 호스트에서 실행하고, YOLO 추론과 DB 서버는 Compose로 실행하는 구성을 제공합니다. 컵라면 외부 인식 서버는 별도 준비가 필요합니다.  
+  
 ## 지원 품목 및 레시피
-
+  
 | 클래스 ID | 품목 |
 | ---: | --- |
 | 0 | 마스크 |
@@ -238,13 +243,7 @@ set +a
 ros2 run kit_db db_node
 ```
 
-### 6. 컵라면 외부 인식 준비
-
-컵라면을 포함한 작업은 `/cup_pick/perception` 서비스와 `/tmp/graspgenx_live/latest.npz` 후보 파일을 제공하는 외부 환경이 필요합니다. 이름과 경로는 `motion.yaml`의 `graspgenx_live`에서 설정합니다.
-
-이 저장소에는 서비스 **호출 및 후보 실행 코드**가 있으며, 외부 FoundationPose–GraspGenX 서버를 설치·시작하는 전체 구성은 포함되어 있지 않습니다. 서버와 로봇 프로세스가 같은 후보 파일을 읽을 수 있도록 경로를 공유하고 카메라·그리퍼 좌표계를 일치시켜야 합니다.
-
-### 7. Controller
+### 6. Controller
 
 ```bash
 ros2 run kit_robot controller --ros-args \
@@ -254,6 +253,102 @@ ros2 run kit_robot controller --ros-args \
 명령 대기 상태에서 `hello rokey`를 말하고 녹음 안내에 따라 작업을 요청합니다. 예: “키트2번 만들어 줘.”
 
 Ubuntu GUI용 [`e2e-up-ubuntu.sh`](scripts/e2e-up-ubuntu.sh)는 Terminator와 tmux로 실행 화면을 구성합니다. 사전 빌드·환경 설정이 필요하며 실기 로봇 IP가 스크립트에 지정되어 있습니다. 외부 컵라면 인식 서버는 별도로 실행해야 합니다.
+
+## 외부 패키지
+
+컵라면을 포함한 작업은 `/cup_pick/perception` 서비스와 `/tmp/graspgenx_live/latest.npz` 후보 파일을 제공하는 외부 환경이 필요합니다. 이름과 경로는 `motion.yaml`의 `graspgenx_live`에서 설정합니다.
+
+### 1. FoundationPose
+
+#### 1. git clone
+```bash
+cd ~
+git clone https://github.com/NVlabs/FoundationPose.git
+cd FoundationPose
+```  
+
+#### 2. Pretrained Weights
+다음 구조가 되도록 FoundationPose 공식 github에서 weights를 준비합니다.
+```bash
+FoundationPose/
+└── weights/
+    ├── 2023-10-28-18-33-37/
+    │   └── model_best.pth
+    │
+    └── 2024-01-11-20-02-45/
+        └── model_best.pth
+```  
+
+#### 3. Custome File
+```bash
+mkdir -p ~/FoundationPose/models
+
+cp ~/Project2-ROS2-VLA/tools/foundation_pose_worker.py \
+   ~/FoundationPose/foundation_pose_worker.py
+   
+cp ~/Project2-ROS2-VLA/tools/RAMYEON.ply \
+   ~/FoundationPose/models/RAMYEON.ply
+   
+cp ~/Project2-ROS2-VLA/src/kit_vision/resource/best.pt \
+   ~/FoundationPose/models/best.pt
+```
+
+#### 4. Docker
+```bash
+docker pull shingarey/foundationpose_custom_cuda121:latest
+```
+
+#### 5. Container 최초 생성
+```bash
+docker run -it \
+  --name foundationpose \
+  --gpus all \
+  --network host \
+  --ipc host \
+  --privileged \
+  -v /home/rokey/FoundationPose:/home/rokey/FoundationPose \
+  shingarey/foundationpose_custom_cuda121:latest \
+  bash
+```
+
+#### 6. conda
+```bash
+source /opt/conda/etc/profile.d/conda.sh
+conda activate my
+cd /home/rokey/FoundationPose
+```
+
+#### 7. Ultralytics
+1. Ultralytics
+```bash
+python -m pip uninstall -y ultralytics
+python -m pip install --no-deps \
+  ultralytics==8.4.140
+python -m pip install \
+  "filelock==3.16.1" \
+  "cloudpickle==3.1.1" \
+  "nvidia-ml-py>=12.0.0" \
+  "polars==0.20.30" \
+  "ultralytics-thop==2.1.6"
+```
+2. C++ Extension
+```bash
+cd /home/rokey/FoundationPose
+bash build_all.sh
+```
+
+3. mycpp import
+```bash
+import mycpp
+```
+
+#### 8. Worker
+```bash
+cd /home/rokey/FoundationPose
+conda activate my
+python foundation_pose_worker.py
+
+
 
 ## 주요 ROS 2 인터페이스
 
