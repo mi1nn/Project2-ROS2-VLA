@@ -9,8 +9,8 @@
 </p>
 
 <p align="center">
-  <img src="image/cycle.gif" width="550">
-  <img src="image/cup.gif" width="550">
+  <img src="image/cycle.gif" width="500">
+  <img src="image/cup.gif" width="500">
 </p>
 
 사용자의 음성 명령을 해석하고 RGB-D 영상에서 물품을 인식하여 **Doosan M0609 협동로봇과 OnRobot RG2 그리퍼로 구조키트를 구성하는 ROS 2 프로젝트**입니다.
