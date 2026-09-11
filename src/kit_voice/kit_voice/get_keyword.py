@@ -1,6 +1,5 @@
 import json
 import os
-import time
 
 import rclpy
 from rclpy.node import Node
@@ -11,13 +10,18 @@ from openai import RateLimitError
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import PromptTemplate
 
+from std_msgs.msg import Empty
+
 from kit_interfaces.msg import CommandResult
 from kit_interfaces.srv import GetCommand
 
 from kit_voice.wakeup_word import WakeupWord
 from kit_voice.stt import STT
 
-WAKEWORD_TIMEOUT = 30.0
+# 웨이크워드 폴링 주기. is_wakeup() 이 1280 프레임(16kHz 에서 80ms)을 블로킹으로
+# 읽으므로 이보다 짧게 잡아도 실제 주기는 80ms 다. 짧게 두면 스트림이 끊김 없이
+# 소비돼 감지 지연이 프레임 한 장으로 유지된다.
+WAKEWORD_POLL_SEC = 0.01
 
 PACKAGE_NAME = "kit_voice"
 PACKAGE_PATH = get_package_share_directory(PACKAGE_NAME)
@@ -145,8 +149,59 @@ class GetCommandNode(Node):
             10,
         )
 
+        # 웨이크워드는 서비스 호출과 무관하게 상시 감지한다. Controller 는 이 토픽을
+        # 받아야 IDLE -> LISTEN 으로 넘어가므로, 감지 책임은 여기 있고 상태 전이
+        # 책임은 Controller 에 있다 (02-interfaces.md §3).
+        self.wakeword_pub = self.create_publisher(Empty, "/kit/wakeword", 1)
+        self.wakeword_armed = False
+        self.create_timer(WAKEWORD_POLL_SEC, self.poll_wakeword)
+
         self.get_command_srv = self.create_service(GetCommand, "/get_command", self.get_command)
         self.get_logger().info("GetCommandNode initialized. wait for client's request...")
+
+    def arm_wakeword(self):
+        """마이크를 열어 웨이크워드 폴링을 시작한다.
+
+        열기 실패로 노드를 죽이지 않는다. USB 마이크가 늦게 붙는 경우가 있어
+        다음 tick 에서 다시 시도한다.
+        """
+        if self.wakeword_armed:
+            return
+        try:
+            self.wakeup_word.open()
+        except Exception as e:
+            self.get_logger().error(f"웨이크워드 마이크 열기 실패 — 재시도: {e}")
+            return
+        self.wakeword_armed = True
+        self.get_logger().info("웨이크워드 대기 시작")
+
+    def disarm_wakeword(self):
+        """폴링을 멈추고 마이크를 놓는다. STT 가 같은 입력 장치를 열기 때문이다."""
+        if not self.wakeword_armed:
+            return
+        self.wakeword_armed = False
+        try:
+            self.wakeup_word.close()
+        except Exception as e:
+            self.get_logger().warn(f"웨이크워드 마이크 닫기 실패: {e}")
+
+    def poll_wakeword(self):
+        if not self.wakeword_armed:
+            self.arm_wakeword()
+            return
+
+        try:
+            detected = self.wakeup_word.is_wakeup()
+        except Exception as e:
+            # 마이크가 빠졌거나 스트림이 깨진 경우. 닫아 두면 다음 tick 이 다시 연다.
+            self.get_logger().error(f"웨이크워드 감지 실패 — 마이크 재연결: {e}")
+            self.disarm_wakeword()
+            return
+
+        if detected:
+            # 한 번 발화하면 연속 몇 프레임이 임계값을 넘는다. 중복 발행은 그대로 두고
+            # Controller 가 IDLE 일 때만 받아들여 거른다.
+            self.wakeword_pub.publish(Empty())
 
     def _openai_error_code(self, e):
         # 크레딧 소진은 type=insufficient_quota / code=credit_balance_exhausted 로 온다.
@@ -168,38 +223,10 @@ class GetCommandNode(Node):
         task_id = request.task_id
         raw_text = ""
 
-        try:
-            self.wakeup_word.open()
-        except Exception as e:
-            self.get_logger().error(f"Error: Failed to open audio stream: {e}")
-            response.success = False
-            response.command_json = ""
-            response.error_code = "stt_failed"
-            return response
-
-        detected = False
-        try:
-            t0 = time.monotonic()
-            while time.monotonic() - t0 < WAKEWORD_TIMEOUT:
-                if self.wakeup_word.is_wakeup():
-                    detected = True
-                    break
-        finally:
-            self.wakeup_word.close()
-
-        if not detected:
-            self.get_logger().warn("wakeword timeout — no detection, returning failure")
-            response.success = False
-            response.command_json = ""
-            response.error_code = "wakeword_timeout"
-
-            self.publish_command_result(
-                task_id,
-                response,
-                raw_text=raw_text,
-            )
-
-            return response
+        # 웨이크워드는 Controller 가 이미 확인하고 이 요청을 보냈다. 여기서 한 번 더
+        # 기다리면 호출어를 두 번 말해야 한다. 대신 폴링이 잡고 있는 마이크를 놓아
+        # STT 가 같은 입력 장치를 열 수 있게 한다.
+        self.disarm_wakeword()
 
         # OpenAI 호출 실패를 콜백 밖으로 흘리면 노드가 통째로 죽는다.
         # 실패는 서비스 실패로 돌려주고 노드는 살려 둔다.
@@ -224,6 +251,10 @@ class GetCommandNode(Node):
                 raw_text=raw_text,
             )
             return response
+
+        finally:
+            # 녹음이 끝나면 곧바로 다시 듣는다. 이후 LLM 구간은 마이크를 쓰지 않는다.
+            self.arm_wakeword()
 
         try:
             llm_output = self.lang_chain.invoke({"user_input": raw_text}).content

@@ -123,7 +123,7 @@ def generate_launch_description():
             DeclareLaunchArgument("gripper", default_value="rg2"),
             DeclareLaunchArgument(
                 "moveit_ready_sec",
-                default_value="20.0",
+                default_value="3.0",
                 description=(
                     "로봇 bringup + move_action/execute_trajectory 가 올라올 때까지. "
                     "Motion 의 server_ready_timeout_sec(15초)이 여기서 시작하므로 "
@@ -132,7 +132,7 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "camera_ready_sec",
-                default_value="12.0",
+                default_value="3.0",
                 description=(
                     "RealSense initial_reset 후 첫 포인트클라우드까지. "
                     "카메라 USB 재연결이 느리면 올린다."

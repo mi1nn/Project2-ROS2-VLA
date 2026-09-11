@@ -245,15 +245,18 @@ string error_code
 
 **`task_id`.** MongoDB `commands`/`kit_executions`/`component_executions` 세 컬렉션을 하나의
 작업으로 묶는 키다([05 데이터베이스](05-database.md) ID 체계). `controller` 가
-`IDLE → LISTEN` 진입 시(이 서비스를 호출하는 유일한 지점) 생성해서 요청에 실어 보낸다.
+웨이크워드를 받아 `IDLE → LISTEN` 으로 넘어가는 시점(이 서비스를 호출하는 유일한 지점)에 생성해서 요청에 실어 보낸다.
 `get_command_node`는 응답과 `/kit/command_result`에 이 값을 그대로 사용하므로, 이후 DB 기록
 단계에서 재발급하지 않고 요청 시점의 값을 계속 쓴다. `command_json` 내부에는 실행 명령인
 `kit_type`과 `items`만 넣고, `task_id`와 `raw_text`는 `CommandResult`의 별도 필드로 전달한다.
 
-**웨이크워드 감지 범위 — 현재 구현 확인.** get_command 콜백 내부에서 마이크를 열어 최대 30초 동안 웨이크워드를 기다린 뒤 닫는다. Controller는 LISTEN에서 요청을 하나만 보낸다. 클라이언트 timeout은 서버 콜백 취소를 뜻하지 않으므로 아래 재시작 정책을 따른다.
+**웨이크워드 감지 범위.** 감지는 `get_command` 콜백 **밖**에 있다. 음성 노드는 기동 직후부터 타이머로 마이크를 폴링하고, 감지하면 `/kit/wakeword`(`std_msgs/Empty`)를 발행한다. Controller는 이 토픽을 받아야 IDLE → LISTEN으로 넘어가고, LISTEN에서 `/get_command`를 한 번 호출한다. 즉 **호출어 없이는 명령 녹음이 시작되지 않는다.** 감지 책임은 음성 노드, 상태 전이 책임은 Controller에 있다.
 
-**반복 작업:** 응답 반환 후 음성 노드는 다음 서비스 요청을 기다린다. 스스로 웨이크워드 대기를 다시 시작하지 않는다. Controller의 VALIDATE~REPORT 동안에는 새 명령 요청이 없고, 키팅이 끝나 IDLE → LISTEN으로 돌아가야 마이크 감지가 다시 시작된다. wakeword_timeout은 실패 응답이며 노드 종료가 아니다. Controller의 명령 응답 제한 60초도 키팅 시간을 포함하지 않는다.
-다만 현재 is_wakeup/close 예외는 실패 응답으로 감싸지 않으므로 별도 보완 대상이다.
+`get_command` 콜백은 웨이크워드를 다시 기다리지 않는다(기다리면 호출어를 두 번 말해야 한다). 대신 폴링이 잡고 있던 마이크를 놓고 STT 녹음을 시작하며, 녹음이 끝나면 곧바로 폴링을 재개한다. 웨이크워드 폴링과 STT는 같은 입력 장치를 쓰므로 동시에 열지 않는다.
+
+**반복 작업:** 응답 반환 후 음성 노드는 계속 웨이크워드를 듣는다. 작업 중(VALIDATE~REPORT) 발화도 감지·발행되지만 Controller가 IDLE이 아니면 버린다. 따라서 작업 중 호출어가 다음 작업을 예약하지 않는다. Controller의 명령 응답 제한 60초는 키팅 시간을 포함하지 않는다.
+
+`is_wakeup`/`open`/`close` 예외는 폴링 타이머가 잡아 마이크를 닫고 다음 tick에서 다시 연다. 마이크가 늦게 붙거나 중간에 빠져도 노드는 죽지 않는다.
 
 **`command_json` 스키마** (success=true 일 때만 유효):
 
@@ -282,7 +285,7 @@ string error_code
 
 | 코드 | 의미 | 로봇 동작 |
 | --- | --- | --- |
-| `wakeword_timeout` | 웨이크워드 미감지 응답 | REPORT에서 FAILED 기록 후 IDLE 재대기 |
+| `wakeword_timeout` | (현재 발생하지 않음) 웨이크워드 대기가 서비스 밖으로 나가면서 timeout 개념이 사라졌다. Controller의 재시작 허용 코드 목록에는 남겨 둔다 | REPORT에서 FAILED 기록 후 IDLE 재대기 |
 | `stt_failed` | 음성 인식 실패 응답 | REPORT에서 FAILED·사유 기록 후 IDLE 재대기 |
 | `invalid_command` | 명령 거부 응답 | REPORT에서 FAILED·사유 기록 후 IDLE 재대기 |
 | `openai_quota_exhausted` | 크레딧 소진 응답 | REPORT에서 FAILED 기록, 자동 재시작 차단 |
@@ -324,7 +327,7 @@ builtin_interfaces/Time stamp
 토픽은 `/kit/command_result`다. 명령 해석과 검증이 끝날 때 성공·실패 모두 발행한다.
 성공 시 `command_json`은 비어 있지 않은 JSON 객체여야 한다.
 
-현재 성공, `wakeword_timeout`, 일반 STT 예외는 발행한다. 오디오 스트림 열기 실패, `RateLimitError`, `invalid_command`, 기타 LLM 예외는 서비스 실패 응답만 반환하고 토픽을 발행하지 않는 분기가 남아 있으므로, **모든 실패가 DB에 기록된다고 가정하면 안 된다.** 서비스 응답의 `command_json`에는 과도기적으로 `raw_text`와 `task_id`도 들어가지만, 발행 메시지의 `command_json`은 `kit_type`과 `items`만 남긴다.
+현재 성공과 일반 STT 예외는 발행한다. `RateLimitError`, `invalid_command`, 기타 LLM 예외는 서비스 실패 응답만 반환하고 토픽을 발행하지 않는 분기가 남아 있으므로, **모든 실패가 DB에 기록된다고 가정하면 안 된다.** 서비스 응답의 `command_json`에는 과도기적으로 `raw_text`와 `task_id`도 들어가지만, 발행 메시지의 `command_json`은 `kit_type`과 `items`만 남긴다.
 
 ### 4.2 `msg/TaskStatus.msg` (로봇 → DB/UI)
 
