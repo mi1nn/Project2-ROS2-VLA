@@ -269,6 +269,7 @@ cd FoundationPose
 
 #### 2. Pretrained Weights
 다음 구조가 되도록 FoundationPose 공식 github에서 weights를 준비합니다.
+https://github.com/NVlabs/FoundationPose
 ```bash
 FoundationPose/
 └── weights/
