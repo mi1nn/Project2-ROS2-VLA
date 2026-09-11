@@ -704,10 +704,6 @@ class Motion:
         if enabled and self._static_octomap_frozen and (not force):
             self._octomap_mapping = False
             return False
-        if enabled != self._octomap_mapping:
-            self.logger.info(
-                f"Octomap mapping {('ON' if enabled else 'OFF')} ({self.octomap_cloud_in} -> {self.octomap_cloud_out})"
-            )
         self._octomap_mapping = enabled
         return enabled
 

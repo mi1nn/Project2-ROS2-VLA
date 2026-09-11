@@ -25,6 +25,11 @@
   <depend>tf2_ros</depend>
   <depend>visualization_msgs</depend>
 
+  <!-- e2e.launch.py 가 띄우는 다른 패키지들. -->
+  <exec_depend>dsr_bringup2</exec_depend>
+  <exec_depend>kit_voice</exec_depend>
+  <exec_depend>realsense2_camera</exec_depend>
+
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-opencv</exec_depend>
   <exec_depend>python3-pymodbus</exec_depend>

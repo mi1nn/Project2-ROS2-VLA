@@ -227,6 +227,7 @@ __marimo__/
 .agents
 .codegraph
 AGENTS.md
+SKILL.md
 
 skills-*
 reference

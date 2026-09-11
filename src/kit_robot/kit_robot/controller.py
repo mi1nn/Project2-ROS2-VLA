@@ -410,9 +410,6 @@ class Controller(Node):
 
             self.place_octomap_ready = True
             self.place_octomap_settle_at = None
-            self.get_logger().info(
-                "초기 고정 OctoMap 생성 완료: 이후 음성 작업에서도 재사용"
-            )
             self._enter_observation_pose()
             return
 
