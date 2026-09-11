@@ -1077,15 +1077,21 @@ def main(args=None):
         while rclpy.ok():
             rclpy.spin_once(node, timeout_sec=0.1)
             node.timer_tick()
+
     except KeyboardInterrupt:
         pass
+
     finally:
         # Motion owns a private MoveIt executor and must stop before ROS shutdown.
         try:
-            if node.motion is not None and hasattr(node.motion, "shutdown"):
+            if (
+                node.motion is not None
+                and hasattr(node.motion, "shutdown")
+            ):
                 node.motion.shutdown()
         finally:
             node.destroy_node()
+
             if rclpy.ok():
                 rclpy.shutdown()
 
