@@ -2,7 +2,7 @@
 <p align="center">
   <img alt="Ubuntu" src="https://img.shields.io/badge/Ubuntu-24.04-E95420?logo=ubuntu&logoColor=white">
   <img alt="ROS 2" src="https://img.shields.io/badge/ROS_2-Jazzy-22314E?logo=ros&logoColor=white">
-  <img alt="Python" src="https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white">
+  <img alt="Host Python" src="https://img.shields.io/badge/Host_Python-3.12-3776AB?logo=python&logoColor=white">
   <img alt="Docker" src="https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white">
   <img alt="NVIDIA GPU" src="https://img.shields.io/badge/NVIDIA-GPU_required-76B900?logo=nvidia&logoColor=white">
   <img alt="License" src="https://img.shields.io/badge/License-Apache_2.0-D22128">
