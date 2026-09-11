@@ -76,7 +76,7 @@ Controller의 7단계 처리기, 서비스 future, 재시도, 결과 발행과 R
 ```mermaid
 stateDiagram-v2
     [*] --> IDLE
-    IDLE --> LISTEN: 작업 초기화
+    IDLE --> LISTEN: 웨이크워드 감지
     LISTEN --> VALIDATE: 명령 수신 성공
     LISTEN --> REPORT: 명령 실패 또는 통신 오류
     VALIDATE --> OBSERVE: 검증 및 슬롯 예약 완료
@@ -94,7 +94,7 @@ stateDiagram-v2
 
 | 상태 | 진입 시 한 번 수행 | 이후 tick에서 확인 | 종료·전이 |
 | --- | --- | --- | --- |
-| IDLE | 변수 초기화, task_id 생성 | 없음 | LISTEN |
+| IDLE | 변수 초기화, 이전 웨이크워드 폐기 | `/kit/wakeword` 수신 확인 | 웨이크워드 감지 시 task_id 생성 후 LISTEN |
 | LISTEN | 서비스 준비 대기 시작 | 준비되면 한 번 요청, future·deadline 확인 | 성공 → VALIDATE / 실패 → REPORT |
 | VALIDATE | 검증, flatten, 전체 슬롯 예약, expected_counts 생성 | 없음 | 성공 → OBSERVE / 실패 → REPORT |
 | OBSERVE | Attempt 시작, 관찰 자세 이동 | 정착 후 자세 확보·좌표 요청 한 번, future 확인 | 성공 → EXECUTE / 실패 → 오류 정책 적용 |
@@ -109,7 +109,7 @@ stateDiagram-v2
 - 서비스 요청은 동시에 하나만 진행한다. 요청한 tick은 반환하고 이후 tick에서 완료 여부를 확인한다.
 - 서비스 준비 대기와 응답 대기는 별도 deadline으로 관리한다. future 예외와 응답 내용도 검사한다.
 - timeout 이후 늦은 결과를 현재 작업에 반영하지 않는다. future 취소는 서버 실행 취소를 보장하지 않는다.
-- task_id는 단일 Controller 운영을 전제로 UTC 마이크로초 형식 `TASK-20260905T053012123456Z`로 IDLE 진입 시 한 번 생성한다.
+- task_id는 단일 Controller 운영을 전제로 UTC 마이크로초 형식 `TASK-20260905T053012123456Z`로 웨이크워드를 받은 시점에 한 번 생성한다. IDLE은 호출어가 올 때까지 머무르므로 IDLE 진입 시각으로 만들면 실제 작업 시각과 벌어진다.
 - 짧은 timer 주기는 Motion 호출의 비동기 실행을 의미하지 않는다. Motion은 내부 전용 노드와 `MultiThreadedExecutor`로 MoveIt2 응답을 처리하지만, Controller timer에서 호출한 고수준 이동 메서드는 완료될 때까지 동기적으로 기다린다.
 
 ### 2.2 설정 소유권

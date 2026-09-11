@@ -11,6 +11,7 @@ from rclpy.node import Node
 from rclpy.parameter import Parameter
 
 from builtin_interfaces.msg import Time
+from std_msgs.msg import Empty
 
 from kit_interfaces.msg import TaskStatus, ComponentResult
 from kit_interfaces.srv import GetCommand, GetComponentPose, InspectKit
@@ -55,6 +56,14 @@ class Controller(Node):
         }
 
         self.command_client = self.create_client(GetCommand, "/get_command")
+
+        # 웨이크워드가 IDLE 을 여는 유일한 열쇠다. 감지는 kit_voice 가 상시 수행하고,
+        # 여기서는 IDLE 일 때 받은 것만 인정한다 — 작업 중 발화는 무시된다.
+        self.wakeword_pending = False
+        self.create_subscription(Empty, "/kit/wakeword", self.on_wakeword, 1)
+
+        # 웨이크워드를 받을 때 채워진다. IDLE 이 머무는 동안에는 발행할 상태가 없다.
+        self.task_id = ""
 
         self.declare_parameter("service_ready_timeout_sec", 20.0)
         self.declare_parameter("command_timeout_sec", 60.0)
@@ -192,12 +201,15 @@ class Controller(Node):
         self.state_entered = False
         self.handlers[self.state](entered)
 
+    def on_wakeword(self, _message):
+        if self.state is not State.IDLE:
+            return
+        self.wakeword_pending = True
+
     def handle_idle(self, entered: bool):
         if not entered:
+            self.check_wakeword()
             return
-
-        now = datetime.now(timezone.utc)
-        self.task_id = f"TASK-{now:%Y%m%dT%H%M%S%fZ}"
 
         self.command_json = ""
         self.kit_type = ""
@@ -237,10 +249,27 @@ class Controller(Node):
         # Prevent duplicate component results when REPORT finalizes the task.
         self.published_component_indices = set()
 
+        # 이전 작업 도중 들어온 발화는 버린다.
+        self.wakeword_pending = False
+        self.get_logger().info("웨이크워드 대기 — 호출어를 말해야 명령을 받는다")
+
+        self.check_wakeword()
+
+    def check_wakeword(self):
+        if not self.wakeword_pending:
+            return
+
+        self.wakeword_pending = False
+
+        # task_id 는 웨이크워드를 받은 시점에 만든다. IDLE 은 이제 호출어가 올 때까지
+        # 머무르므로, IDLE 진입 시각으로 만들면 실제 작업 시각과 얼마든지 벌어진다.
+        now = datetime.now(timezone.utc)
+        self.task_id = f"TASK-{now:%Y%m%dT%H%M%S%fZ}"
+
         self.transition_to(
             State.LISTEN,
             TransitionCategory.NORMAL,
-            "새 작업 초기화 완료",
+            "웨이크워드 감지",
         )
 
     def handle_listen(self, entered: bool):
