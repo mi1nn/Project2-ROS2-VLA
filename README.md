@@ -8,6 +8,11 @@
   <img alt="License" src="https://img.shields.io/badge/License-Apache_2.0-D22128">
 </p>
 
+<p align="center">
+  <img src="src/image/cycle.gif">
+  <img src="src/image/cup.gif">
+</p>
+
 사용자의 음성 명령을 해석하고 RGB-D 영상에서 물품을 인식하여 **Doosan M0609 협동로봇과 OnRobot RG2 그리퍼로 구조키트를 구성하는 ROS 2 프로젝트**입니다.
 
 웨이크워드 감지, STT·LLM 명령 해석, YOLO Segmentation, 좌표 변환, MoveIt 2 경로 계획, 파지·배치, 구성품 검사와 결과 저장을 연결합니다. Vision–Language–Action 모듈을 ROS2로 통합한 구조입니다.
