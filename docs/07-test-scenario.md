@@ -2,16 +2,9 @@
 
 관련 문서: [03 시스템 플로우](03-system-flow.md) · [06 실행 가이드](06-controller-guide.md)
 
-## 1. 목적과 현재 중단 조건
+## 1. 목적
 
 이 문서는 실제 MoveIt2·M0609·RG2와 현재 브랜치의 두 파지 경로를 검증하기 위한 절차다. 과거 `MotionDemo`·데모 서비스는 현재 저장소에 없으며 시험 대상으로 사용하지 않는다.
-
-현재 Controller E2E에는 다음 호환성 문제가 있다.
-
-- Controller가 현재 Motion에 없는 `set_octomap_exclusion_component()`를 호출한다.
-- Controller가 `move_to_inspection_pose(clear_before=True)`를 호출하지만 현재 메서드는 인자를 받지 않는다.
-
-따라서 **1~4절의 준비·독립 GraspGenX 시험은 진행할 수 있지만, 5절 Controller E2E는 두 계약을 정리한 뒤 진행한다.** 이 문서는 코드 수정 없이 중단 조건을 기록한다.
 
 ## 2. 공통 준비
 
@@ -112,7 +105,7 @@ python3 -m kit_robot.grasp_pick_test \
 - 파지 검출 성공 시 다음 후보를 시도하지 않는다.
 - 모든 후보 실패 또는 예외 후 OctoMap 제외 영역이 해제된다.
 
-## 5. 기존 Controller E2E — 호환성 정리 후 실행
+## 5. 기존 Controller E2E
 
 ### 5.1 DB와 애플리케이션 노드
 
@@ -147,7 +140,12 @@ ros2 run kit_robot position_estimation
 ros2 run kit_voice get_command
 ```
 
-Controller 실행 전에 결과 토픽을 구독한다.
+### 7. Controller 노드 실행
+```bash
+ros2 run kit_robot controller --ros-args \
+--params-file src/kit_robot/resource/controller.yaml \
+-p restart_delay_sec:=10.0
+```
 
 ```bash
 ros2 run kit_robot controller --ros-args \

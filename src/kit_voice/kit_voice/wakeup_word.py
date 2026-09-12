@@ -28,7 +28,6 @@ class WakeupWord:
         audio_chunk, _ = self.stream.read(FRAME)
         audio_chunk = audio_chunk.flatten()
         confidence = self.model.predict(audio_chunk)[self.model_name]
-        print("confidence: ", confidence)
         if confidence > 0.3:
             print("Wakeword detected!")
             return True

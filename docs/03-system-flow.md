@@ -6,7 +6,7 @@
 
 ## 1. 전체 시퀀스
 
-기존 YOLO 좌표 경로로 실제 장비를 연결할 때의 의도된 흐름이다. 현재 `main()`은 실제 `Motion`을 생성하지만, `feature/grasp` 브랜치에는 Controller와 Motion 사이의 메서드 호환성 문제가 남아 있어 아래 전체 흐름을 그대로 실행할 수 있는 상태는 아니다. 음성 노드의 `CommandResult` publisher는 구현되어 있으나 일부 실패 분기에서는 아직 발행하지 않는다.
+기존 YOLO 좌표 경로로 실제 장비를 연결할 때의 의도된 흐름이다. 현재 `main()`은 실제 `Motion`을 생성한다. 음성 노드의 `CommandResult` publisher는 구현되어 있으나 일부 실패 분기에서는 아직 발행하지 않는다.
 
 ```mermaid
 sequenceDiagram
@@ -70,13 +70,13 @@ sequenceDiagram
 - EMERGENCY, 일시 정지, 실행 중 강제 중단은 이번 구현 범위에서 제외한다.
 
 Controller의 7단계 처리기, 서비스 future, 재시도, 결과 발행과 REPORT가 구현되어 있다.
-현재 main은 Controller를 생성한 뒤 실제 `Motion(node)`을 연결한다. 다만 Controller가 삭제된 `set_octomap_exclusion_component()`를 호출하고 `move_to_inspection_pose(clear_before=True)`를 호출하는 반면 현재 Motion은 해당 메서드/인자를 제공하지 않는다. 이 두 계약이 정리되기 전에는 전체 상태머신의 실기 실행을 완료 상태로 보지 않는다.
+현재 main은 Controller를 생성한 뒤 실제 `Motion(node)`을 연결한다.
 실행·파라미터·검증 범위는 [06 Controller 실행 가이드](06-controller-guide.md)에 정리한다.
 
 ```mermaid
 stateDiagram-v2
     [*] --> IDLE
-    IDLE --> LISTEN: 작업 초기화
+    IDLE --> LISTEN: 웨이크워드 감지
     LISTEN --> VALIDATE: 명령 수신 성공
     LISTEN --> REPORT: 명령 실패 또는 통신 오류
     VALIDATE --> OBSERVE: 검증 및 슬롯 예약 완료
@@ -94,7 +94,7 @@ stateDiagram-v2
 
 | 상태 | 진입 시 한 번 수행 | 이후 tick에서 확인 | 종료·전이 |
 | --- | --- | --- | --- |
-| IDLE | 변수 초기화, task_id 생성 | 없음 | LISTEN |
+| IDLE | 변수 초기화, 이전 웨이크워드 폐기 | `/kit/wakeword` 수신 확인 | 웨이크워드 감지 시 task_id 생성 후 LISTEN |
 | LISTEN | 서비스 준비 대기 시작 | 준비되면 한 번 요청, future·deadline 확인 | 성공 → VALIDATE / 실패 → REPORT |
 | VALIDATE | 검증, flatten, 전체 슬롯 예약, expected_counts 생성 | 없음 | 성공 → OBSERVE / 실패 → REPORT |
 | OBSERVE | Attempt 시작, 관찰 자세 이동 | 정착 후 자세 확보·좌표 요청 한 번, future 확인 | 성공 → EXECUTE / 실패 → 오류 정책 적용 |
@@ -109,7 +109,7 @@ stateDiagram-v2
 - 서비스 요청은 동시에 하나만 진행한다. 요청한 tick은 반환하고 이후 tick에서 완료 여부를 확인한다.
 - 서비스 준비 대기와 응답 대기는 별도 deadline으로 관리한다. future 예외와 응답 내용도 검사한다.
 - timeout 이후 늦은 결과를 현재 작업에 반영하지 않는다. future 취소는 서버 실행 취소를 보장하지 않는다.
-- task_id는 단일 Controller 운영을 전제로 UTC 마이크로초 형식 `TASK-20260905T053012123456Z`로 IDLE 진입 시 한 번 생성한다.
+- task_id는 단일 Controller 운영을 전제로 UTC 마이크로초 형식 `TASK-20260905T053012123456Z`로 웨이크워드를 받은 시점에 한 번 생성한다. IDLE은 호출어가 올 때까지 머무르므로 IDLE 진입 시각으로 만들면 실제 작업 시각과 벌어진다.
 - 짧은 timer 주기는 Motion 호출의 비동기 실행을 의미하지 않는다. Motion은 내부 전용 노드와 `MultiThreadedExecutor`로 MoveIt2 응답을 처리하지만, Controller timer에서 호출한 고수준 이동 메서드는 완료될 때까지 동기적으로 기다린다.
 
 ### 2.2 설정 소유권
@@ -373,13 +373,6 @@ Motion은 시작 시 OctoMap 중계를 열고, 관찰 자세에서는 기존 지
 기존 `pick_component()`는 target_pose 중심에 파지 폭 기반 구형 제외 영역을 설정하고 전체 OctoMap을 지운 뒤 기본 1초 동안 다시 스캔한다. 성공·실패 후에는 제외 영역을 해제한다. `place_component()`는 검사 자세로 이동해 배치 영역 지도를 다시 만든 후 슬롯으로 이동한다. GraspGenX 경로는 완성 객체 포인트클라우드의 bounding box로 중심과 반지름을 구하고, margin과 최소·최대 반지름을 적용해 같은 구형 제외를 사용한다.
 
 Motion 초기화 시 `<octomap>` ACM에서 기본 `link_6`, `tool0`, `rg2_base_link`의 충돌을 허용한다. 고정 `default_keepout_box`는 planning scene에 추가하고 RViz marker는 반투명 **빨간색**으로 발행한다. 현재 `motion.yaml`의 키는 `enable`이지만 코드는 `enabled`를 읽으므로, 명시값이 아니라 코드 기본값 `true`로 활성화되는 상태다.
-
-현재 Controller와 Motion의 OctoMap 계약에는 두 불일치가 있다.
-
-- Controller는 현재 Motion에 없는 `set_octomap_exclusion_component()`를 호출한다.
-- Controller는 인자를 받지 않는 `move_to_inspection_pose()`에 `clear_before=True`를 전달한다.
-
-두 호출을 정리하기 전에는 Controller 전체 실행을 시작하지 않는다.
 
 #### OctoMap 센서 설정 메모 (2026-09-09)
 

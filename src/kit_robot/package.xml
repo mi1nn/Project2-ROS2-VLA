@@ -5,40 +5,37 @@
 <package format="3">
   <name>kit_robot</name>
   <version>0.0.0</version>
-  <description>Kit robot controller with MoveIt2</description>
+  <description>ROS 2 motion and perception controller for relief kit assembly</description>
 
   <maintainer email="alekdi8gm30@gmail.com">min</maintainer>
-  <license>TODO: License declaration</license>
+  <license>Apache-2.0</license>
 
-  <!-- ROS2 -->
+  <buildtool_depend>ament_python</buildtool_depend>
+
   <depend>rclpy</depend>
   <depend>ament_index_python</depend>
   <depend>kit_interfaces</depend>
 
-  <!-- Controller -->
   <depend>builtin_interfaces</depend>
-
-  <!-- MoveIt2 -->
   <depend>geometry_msgs</depend>
   <depend>moveit_msgs</depend>
-  <depend>tf2_ros</depend>
-  <!-- keepout box: SolidPrimitive + RViz Marker. moveit_msgs 가 transitive 로
-       끌어오지만, ament_python 은 import 를 빌드 때 검사하지 않아 빠지면
-       Motion.__init__ 에서 ModuleNotFoundError 로 터진다. -->
-  <depend>shape_msgs</depend>
-  <depend>visualization_msgs</depend>
-  <!-- Octomap gate: point-cloud relay + clear_octomap -->
   <depend>sensor_msgs</depend>
+  <depend>shape_msgs</depend>
   <depend>std_srvs</depend>
+  <depend>tf2_ros</depend>
+  <depend>visualization_msgs</depend>
 
-  <!-- Python runtime -->
-  <exec_depend>python3-yaml</exec_depend>
-  <exec_depend>python3-pymodbus</exec_depend>
-  <exec_depend>python3-scipy</exec_depend>
+  <!-- e2e.launch.py 가 띄우는 다른 패키지들. -->
+  <exec_depend>dsr_bringup2</exec_depend>
+  <exec_depend>kit_voice</exec_depend>
+  <exec_depend>realsense2_camera</exec_depend>
+
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-pymodbus</exec_depend>
+  <exec_depend>python3-scipy</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
 
-  <!-- Test -->
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
   <test_depend>ament_pep257</test_depend>

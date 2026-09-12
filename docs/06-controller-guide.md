@@ -9,7 +9,7 @@
 1. **기존 Controller 경로:** 음성 명령 → YOLO 검출 → `position_estimation` 좌표 → `Motion.pick_component()` → 슬롯 배치 → 검사
 2. **FoundationPose + GraspGenX 독립 시험:** 외부 NPZ/NPY 파일 → `grasp_pick_test.py` → `Motion.pick_graspgenx_candidates()`
 
-`controller.py`의 `main()`은 실제 MoveIt2 기반 `Motion(node)`을 생성한다. 다만 현재 Controller가 Motion에 없는 `set_octomap_exclusion_component()`를 호출하고, 인자를 받지 않는 `move_to_inspection_pose()`에 `clear_before=True`를 전달한다. **이 두 호환성 문제를 정리하기 전에는 Controller E2E를 실행하지 않는다.** 이 문서는 현재 상태를 기록하며 코드를 수정하지 않는다.
+`controller.py`의 `main()`은 실제 MoveIt2 기반 `Motion(node)`을 생성한다. 이 문서는 현재 상태를 기록하며 코드를 수정하지 않는다.
 
 | 파일 | 현재 역할 |
 | --- | --- |
@@ -65,14 +65,9 @@ ros2 run tf2_ros tf2_echo base_link link_6
 
 ## 4. 기존 Controller 경로
 
-### 4.1 실행 전 중단 조건
+### 4.1 실행 전 준비 조건
 
-현재 브랜치는 아래 두 호출 계약이 맞지 않으므로 그대로 실행하지 않는다.
-
-- `controller.py`: `set_octomap_exclusion_component(component.name)` 호출 — 현재 Motion에 메서드 없음
-- `controller.py`: `move_to_inspection_pose(clear_before=True)` 호출 — 현재 Motion 메서드는 인자 없음
-
-향후 코드 작업에서 계약을 정리한 뒤, `/get_command`, `/get_component_pose`, `/inspect_kit`, 비전 토픽, MoveIt/RG2가 모두 준비된 상태에서 실행한다.
+`/get_command`, `/get_component_pose`, `/inspect_kit`, 비전 토픽, MoveIt/RG2가 모두 준비된 상태에서 실행한다.
 
 ```bash
 ros2 run kit_robot controller --ros-args \
