@@ -1,0 +1,179 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="boxer_mobile">
+
+  <!-- Include materials -->
+  <xacro:include filename="$(find dsr_description2)/config/macro.materials.xacro"/>
+
+  <!-- Boxer base dimensions (OTTO 100 / Boxer 2.4) -->
+  <xacro:property name="base_x_size" value="0.74143" />
+  <xacro:property name="base_y_size" value="0.55093" />
+  <xacro:property name="base_z_size" value="0.2884" />
+  <xacro:property name="base_mass" value="51.0" />
+
+  <!-- Wheel properties -->
+  <xacro:property name="wheel_radius" value="0.080" />
+  <xacro:property name="wheel_width" value="0.04" />
+  <xacro:property name="wheel_mass" value="5.0" />
+  <xacro:property name="wheel_x_offset" value="0.0" />
+  <xacro:property name="wheel_y_offset" value="0.29" />
+  <xacro:property name="wheel_z_offset" value="0.0" />
+
+  <!-- Caster properties -->
+  <xacro:property name="caster_radius" value="0.0625" />
+  <xacro:property name="caster_width" value="0.0827" />
+  <xacro:property name="caster_mass" value="2.0" />
+  <xacro:property name="caster_x_offset" value="0.30" />
+  <xacro:property name="caster_y_offset" value="0.24" />
+  <xacro:property name="caster_z_offset" value="-0.08" />
+
+  <!-- Drive wheel macro -->
+  <xacro:macro name="drive_wheel" params="prefix reflect">
+    <link name="${prefix}_wheel_link">
+      <inertial>
+        <mass value="${wheel_mass}" />
+        <origin xyz="0 0 0" rpy="0 0 0" />
+        <inertia
+          ixx="${wheel_mass*(3*wheel_radius*wheel_radius + wheel_width*wheel_width)/12}"
+          ixy="0" ixz="0"
+          iyy="${wheel_mass*wheel_radius*wheel_radius/2}"
+          iyz="0"
+          izz="${wheel_mass*(3*wheel_radius*wheel_radius + wheel_width*wheel_width)/12}" />
+      </inertial>
+      <!-- Visual removed - wheels are part of the base mesh -->
+      <collision>
+        <origin xyz="0 0 0" rpy="${pi/2} 0 0" />
+        <geometry>
+          <cylinder radius="${wheel_radius}" length="${wheel_width}" />
+        </geometry>
+      </collision>
+    </link>
+
+    <gazebo reference="${prefix}_wheel_link">
+      <mu1 value="1.0"/>
+      <mu2 value="1.0"/>
+      <kp value="10000000.0" />
+      <kd value="1.0" />
+      <fdir1 value="1 0 0"/>
+      <material>Gazebo/Black</material>
+    </gazebo>
+
+    <joint name="${prefix}_wheel_joint" type="continuous">
+      <parent link="mobile_base_link"/>
+      <child link="${prefix}_wheel_link"/>
+      <origin xyz="${wheel_x_offset} ${reflect*wheel_y_offset} ${wheel_z_offset}" rpy="0 0 0" />
+      <axis xyz="0 1 0" />
+      <limit effort="30" velocity="5.0"/>
+    </joint>
+
+    <!-- Transmission for ros2_control -->
+    <transmission name="${prefix}_wheel_trans">
+      <type>transmission_interface/SimpleTransmission</type>
+      <joint name="${prefix}_wheel_joint">
+        <hardwareInterface>hardware_interface/VelocityJointInterface</hardwareInterface>
+      </joint>
+      <actuator name="${prefix}_wheel_motor">
+        <hardwareInterface>hardware_interface/VelocityJointInterface</hardwareInterface>
+        <mechanicalReduction>1</mechanicalReduction>
+      </actuator>
+    </transmission>
+  </xacro:macro>
+
+  <!-- Caster wheel macro -->
+  <xacro:macro name="caster_wheel" params="prefix reflect_x reflect_y">
+    <link name="${prefix}_caster_link">
+      <inertial>
+        <mass value="${caster_mass}" />
+        <origin xyz="0 0 0" rpy="0 0 0" />
+        <inertia
+          ixx="${caster_mass*(3*caster_radius*caster_radius + caster_width*caster_width)/12}"
+          ixy="0" ixz="0"
+          iyy="${caster_mass*caster_radius*caster_radius/2}"
+          iyz="0"
+          izz="${caster_mass*(3*caster_radius*caster_radius + caster_width*caster_width)/12}" />
+      </inertial>
+      <!-- Visual removed - casters are part of the base mesh -->
+      <collision>
+        <origin xyz="0 0 0" rpy="${pi/2} 0 0" />
+        <geometry>
+          <sphere radius="${caster_radius}" />
+        </geometry>
+      </collision>
+    </link>
+
+    <gazebo reference="${prefix}_caster_link">
+      <mu1 value="0.1"/>
+      <mu2 value="0.1"/>
+      <kp value="10000000.0" />
+      <kd value="1.0" />
+      <material>Gazebo/Grey</material>
+    </gazebo>
+
+    <joint name="${prefix}_caster_joint" type="fixed">
+      <parent link="mobile_base_link"/>
+      <child link="${prefix}_caster_link"/>
+      <origin xyz="${reflect_x*caster_x_offset} ${reflect_y*caster_y_offset} ${caster_z_offset}" rpy="0 0 0" />
+    </joint>
+  </xacro:macro>
+
+  <!-- Main mobile base macro -->
+  <xacro:macro name="boxer_mobile_base" params="prefix:=''">
+
+    <!-- Base footprint (for navigation) -->
+    <link name="${prefix}mobile_base_footprint">
+      <visual>
+        <origin xyz="0 0 0" rpy="0 0 0" />
+        <geometry>
+          <box size="0.001 0.001 0.001" />
+        </geometry>
+      </visual>
+    </link>
+
+    <joint name="${prefix}mobile_base_footprint_joint" type="fixed">
+      <origin xyz="0 0 0.0275" rpy="0 0 0" />
+      <parent link="${prefix}mobile_base_footprint" />
+      <child link="${prefix}mobile_base_link" />
+    </joint>
+
+    <!-- Base link (chassis) -->
+    <link name="${prefix}mobile_base_link">
+      <inertial>
+        <mass value="${base_mass}" />
+        <origin xyz="0 0 0.07" rpy="${pi/2} 0 0" />
+        <inertia
+          ixx="2.3" ixy="0" ixz="0"
+          iyy="3.35" iyz="0"
+          izz="1.22" />
+      </inertial>
+      <visual>
+        <origin xyz="0 0 0" rpy="0 0 0" />
+        <geometry>
+          <mesh filename="package://dsr_description2/meshes/boxer/boxer24_no_sensors.stl" scale="0.001 0.001 0.001" />
+        </geometry>
+        <material name="Boxer_DarkGrey"/>
+      </visual>
+      <collision>
+        <origin xyz="0 0 ${base_z_size/2}" rpy="0 0 0" />
+        <geometry>
+          <box size="${base_x_size} ${base_y_size} ${base_z_size}" />
+        </geometry>
+      </collision>
+    </link>
+
+    <gazebo reference="${prefix}mobile_base_link">
+      <material>Gazebo/Grey</material>
+    </gazebo>
+
+    <!-- Instantiate wheels -->
+    <xacro:drive_wheel prefix="${prefix}left" reflect="1" />
+    <xacro:drive_wheel prefix="${prefix}right" reflect="-1" />
+
+    <!-- Instantiate casters -->
+    <xacro:caster_wheel prefix="${prefix}front_left" reflect_x="1" reflect_y="1" />
+    <xacro:caster_wheel prefix="${prefix}front_right" reflect_x="1" reflect_y="-1" />
+    <xacro:caster_wheel prefix="${prefix}rear_left" reflect_x="-1" reflect_y="1" />
+    <xacro:caster_wheel prefix="${prefix}rear_right" reflect_x="-1" reflect_y="-1" />
+
+  </xacro:macro>
+
+</robot>
+

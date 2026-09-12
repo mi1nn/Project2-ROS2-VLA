@@ -98,7 +98,7 @@ float64[] depth_position
 
 ```
 # 검출된 물체 하나. 좌표계는 카메라 기준, 단위 mm.
-string     class_name      # class_names.json 의 이름. 예: "cup_ramen"
+string     class_name      # class_names.json 의 이름. 예: "컵라면"
 float32    score           # 0.0 ~ 1.0
 float64[3] camera_xyz      # 카메라 좌표계 (x, y, z), mm
 float64[]  masking_map     # polygon 마스킹맵
@@ -157,15 +157,15 @@ string         error_code       # 아래 표 참조
 
 | 경로 | 판정 |
 | --- | --- |
-| position_estimation 이 `get_current_posx()` 호출 | **불가.** `DSR_ROBOT2` 를 import 하면 `DR_init.__dsr__node` 전역 싱글턴을 controller 와 다투게 된다 |
-| TF2 로 `base ← camera` lookup | 정석이지만, 두산 드라이버가 해당 TF 를 발행하는지 확인이 필요하다 |
-| **controller 가 request 에 담아 전달** | **채택.** controller 는 이미 posx 를 안다 |
+| position_estimation 이 로봇 API를 직접 호출 | 노드 간 결합이 생기므로 사용하지 않는다 |
+| position_estimation 이 TF2를 직접 조회 | 가능하지만 좌표 서비스가 로봇 TF 런타임에 직접 의존한다 |
+| **Controller가 request에 담아 전달** | **현재 구현.** `Motion.get_current_pose()`가 TF로 자세를 얻어 Controller에 반환한다 |
 
-**근거:** `reference/` 전체에서 로봇 자세를 얻는 코드는 예외 없이 `get_current_posx()` API 호출이다 (`robot_control.py`, `rokey_cobot2/basic/get_current_pos.py`, `jog_complete.py`). posx 를 담은 상태 토픽이나 TF 를 쓰는 예가 하나도 없다. 즉 **토픽/TF 가 있다는 근거가 없다.** 10일 일정에서 확인되지 않은 전제 위에 크리티컬 패스를 올리지 않는다.
+현재 Motion은 `base_frame → eef_link` TF를 조회하고 Doosan 호환 `[x_mm, y_mm, z_mm, A_deg, B_deg, C_deg]`로 바꿔 반환한다. Controller는 좌표 서비스 호출 직전에 이 값을 읽어 `robot_posx`에 넣는다.
 
-request 로 넘기면 `position_estimation` 은 로봇 API 를 전혀 import 하지 않는 **순수 계산 노드**가 된다. DR_init 충돌이 원천적으로 없고, 로봇 없이 단위 검증이 가능하다.
+request로 넘기면 `position_estimation`은 로봇 이동 API와 TF를 직접 다루지 않는 **순수 계산 노드**가 된다. 고정 request로 변환 로직만 단위 시험할 수 있다는 장점도 유지된다.
 
-> Day 1 에 `ros2 topic list | grep dsr` 로 상태 토픽 존재를 확인한다. 있으면 position_estimation 이 구독하고 `robot_posx` 는 오버라이드용으로 남는다. **어느 쪽이든 계약은 그대로**라 팀 재빌드가 발생하지 않는다.
+> 정확한 변환을 위해서는 검출 프레임과 `robot_posx`가 같은 관찰 자세에서 얻어져야 한다. Controller는 관찰 자세 이동 후 정착 시간을 둔 다음 현재 자세를 읽고 좌표 서비스를 호출한다.
 
 ### 2.6 최신성 가드 — 생략 불가
 
@@ -179,7 +179,7 @@ eye-in-hand 구성에서 가장 위험한 실패다. position_estimation 이 들
 
 Controller는 error_code=stale로 좌표 검출 노후를 처리한다. 검사 서비스의 detection_age만 검사 JSON에 기록한다.
 
-**Controller 초기 정책:** max_age_sec=1.0, 관찰·검사 정착 대기 1.2초를 사용한다.
+**Controller 코드 기본값:** `max_age_sec=1.0`, 관찰·검사 정착 대기 `1.2초`다. 현재 제공되는 `controller.yaml`은 실기 설정으로 각각 `3.0초`, `4.0초`를 덮어쓴다.
 정착 시작은 자세 이동 완료 시점이며 응답을 받을 때까지 해당 자세를 유지한다.
 검출 stamp와 서버 시각이 동일 시간 기준이고 이동 완료 시점을 정확히 안다는 전제다.
 호스트 간 시계 오차도 0.2초 여유 이내여야 한다. 미래 stamp·시계 불일치 방어가 완료되었다고
@@ -221,11 +221,17 @@ expected_classes와 expected_counts는 원래 검증된 명령에서 동일 순�
 
 현재 inspect_counts는 전체 검출을 세며 트레이 ROI 필터는 없다. 초기 운영에서는 검사 화면에 완성 트레이의 검사 대상 물체만 포함되도록 배치한다. 원본 물체가 함께 보이면 검사 성공 판정에 사용하기 전에 촬영 구성을 조정한다. ROI 필터 추가는 이번 범위 밖이다.
 
+### 2.8 GraspGenX 경로의 인터페이스 경계
+
+FoundationPose + GraspGenX 파지는 현재 `GetComponentPose`를 사용하지 않는다. `grasp_pick_test.py`가 외부 파일의 `grasp_poses`, `scores`, 완성 객체 포인트클라우드를 읽어 Motion에 직접 전달한다.
+
+따라서 이 경로는 `kit_interfaces` 계약을 변경하지 않은 독립 시험 경로다. GraspGenX 후보를 Controller 상태머신에 연결하거나 토픽·서비스로 전달하는 계약은 아직 구현되어 있지 않다.
+
 ---
 
 ## 3. 음성 ↔ 로봇
 
-### 3.1 `srv/GetCommand.srv` → `command_node` 가 서버
+### 3.1 `srv/GetCommand.srv` → `get_command` (`get_command_node`)가 서버
 
 ```
 string task_id   # 작업 1회 식별자. controller 가 생성해 요청에 담는다.
@@ -239,24 +245,28 @@ string error_code
 
 **`task_id`.** MongoDB `commands`/`kit_executions`/`component_executions` 세 컬렉션을 하나의
 작업으로 묶는 키다([05 데이터베이스](05-database.md) ID 체계). `controller` 가
-`IDLE → LISTEN` 진입 시(이 서비스를 호출하는 유일한 지점) 생성해서 요청에 실어 보낸다.
-`command_node` 는 응답과 `/kit/command_result`에 이 값을 그대로 사용하므로, 이후 DB 기록
+웨이크워드를 받아 `IDLE → LISTEN` 으로 넘어가는 시점(이 서비스를 호출하는 유일한 지점)에 생성해서 요청에 실어 보낸다.
+`get_command_node`는 응답과 `/kit/command_result`에 이 값을 그대로 사용하므로, 이후 DB 기록
 단계에서 재발급하지 않고 요청 시점의 값을 계속 쓴다. `command_json` 내부에는 실행 명령인
 `kit_type`과 `items`만 넣고, `task_id`와 `raw_text`는 `CommandResult`의 별도 필드로 전달한다.
 
-**웨이크워드 감지 범위 — 현재 구현 확인.** get_command 콜백 내부에서 마이크를 열어 최대 30초 동안 웨이크워드를 기다린 뒤 닫는다. Controller는 LISTEN에서 요청을 하나만 보낸다. 클라이언트 timeout은 서버 콜백 취소를 뜻하지 않으므로 아래 재시작 정책을 따른다.
+**웨이크워드 감지 범위.** 감지는 `get_command` 콜백 **밖**에 있다. 음성 노드는 기동 직후부터 타이머로 마이크를 폴링하고, 감지하면 `/kit/wakeword`(`std_msgs/Empty`)를 발행한다. Controller는 이 토픽을 받아야 IDLE → LISTEN으로 넘어가고, LISTEN에서 `/get_command`를 한 번 호출한다. 즉 **호출어 없이는 명령 녹음이 시작되지 않는다.** 감지 책임은 음성 노드, 상태 전이 책임은 Controller에 있다.
 
-**반복 작업:** 응답 반환 후 음성 노드는 다음 서비스 요청을 기다린다. 스스로 웨이크워드 대기를 다시 시작하지 않는다. Controller의 VALIDATE~REPORT 동안에는 새 명령 요청이 없고, 키팅이 끝나 IDLE → LISTEN으로 돌아가야 마이크 감지가 다시 시작된다. wakeword_timeout은 실패 응답이며 노드 종료가 아니다. Controller의 명령 응답 제한 60초도 키팅 시간을 포함하지 않는다.
-다만 현재 is_wakeup/close 예외는 실패 응답으로 감싸지 않으므로 별도 보완 대상이다.
+`get_command` 콜백은 웨이크워드를 다시 기다리지 않는다(기다리면 호출어를 두 번 말해야 한다). 대신 폴링이 잡고 있던 마이크를 놓고 STT 녹음을 시작하며, 녹음이 끝나면 곧바로 폴링을 재개한다. 웨이크워드 폴링과 STT는 같은 입력 장치를 쓰므로 동시에 열지 않는다.
+
+**반복 작업:** 응답 반환 후 음성 노드는 계속 웨이크워드를 듣는다. 작업 중(VALIDATE~REPORT) 발화도 감지·발행되지만 Controller가 IDLE이 아니면 버린다. 따라서 작업 중 호출어가 다음 작업을 예약하지 않는다. Controller의 명령 응답 제한 60초는 키팅 시간을 포함하지 않는다.
+
+`is_wakeup`/`open`/`close` 예외는 폴링 타이머가 잡아 마이크를 닫고 다음 tick에서 다시 연다. 마이크가 늦게 붙거나 중간에 빠져도 노드는 죽지 않는다.
 
 **`command_json` 스키마** (success=true 일 때만 유효):
 
 ```json
 {
-  "kit_type": "earthquake",
+  "kit_type": "키트1번",
   "items": [
-    {"name": "cup_ramen", "qty": 2},
-    {"name": "mask",      "qty": 1}
+    {"name": "컵라면", "qty": 1},
+    {"name": "샴푸리필", "qty": 1},
+    {"name": "양갱", "qty": 1}
   ]
 }
 ```
@@ -275,7 +285,7 @@ string error_code
 
 | 코드 | 의미 | 로봇 동작 |
 | --- | --- | --- |
-| `wakeword_timeout` | 웨이크워드 미감지 응답 | REPORT에서 FAILED 기록 후 IDLE 재대기 |
+| `wakeword_timeout` | (현재 발생하지 않음) 웨이크워드 대기가 서비스 밖으로 나가면서 timeout 개념이 사라졌다. Controller의 재시작 허용 코드 목록에는 남겨 둔다 | REPORT에서 FAILED 기록 후 IDLE 재대기 |
 | `stt_failed` | 음성 인식 실패 응답 | REPORT에서 FAILED·사유 기록 후 IDLE 재대기 |
 | `invalid_command` | 명령 거부 응답 | REPORT에서 FAILED·사유 기록 후 IDLE 재대기 |
 | `openai_quota_exhausted` | 크레딧 소진 응답 | REPORT에서 FAILED 기록, 자동 재시작 차단 |
@@ -287,8 +297,10 @@ string error_code
 
 이 코드 체계는 레퍼런스 `get_keyword.py` 가 이미 쓰던 것을 그대로 승계한다. 크레딧 소진과 레이트 리밋을 구분하는 게 실전에서 유효했다 — 전자는 기다려도 안 풀린다.
 
-> **[열린 이슈] `kit_type` → 레시피 자동 조회.**
-> 지금은 LLM이 발화에서 `kit_type`과 `items`를 함께 추출한다. [05 데이터베이스](05-database.md)는 작업 레시피를 저장 범위에서 제외하므로, `kit_type`만으로 품목을 채우는 기능이 필요해지면 DB 스키마와 분리된 설정 파일 또는 별도 서비스 계약을 추가로 정해야 한다.
+**`kit_type` → 레시피 자동 조회 (해결됨).** DB 스키마를 건드리는 대신 `kit_voice/resource/kit_recipes.json`
+(키트명 → {품목명: 수량})을 프롬프트에 심는 방식으로 처리한다. "키트1번 집어줘"처럼 키트를 통째로 지칭하면
+LLM이 `kit_recipes.json`의 정의를 읽어 `items`를 그 키트의 품목들로 풀어서 채우고, `kit_type`에는 지칭한
+키트 이름을 그대로 넣는다 — `command_json` 스키마 자체는 바뀌지 않는다.
 
 ---
 
@@ -299,7 +311,7 @@ DB 노드는 아래 세 토픽을 구독한다. MongoDB 필드 매핑, 검증 �
 
 ### 4.1 `msg/CommandResult.msg` (음성 → DB)
 
-아래는 목표 발행 계약이다. 현재 get_keyword.py의 서비스 응답은 구현되어 있으나 CommandResult publisher 연결은 후속 작업이다. Controller의 결과 토픽 두 개는 발행 구현이 되어 있다.
+`get_keyword.py`는 아래 형식의 `CommandResult` publisher를 구현해 `/kit/command_result`로 발행한다. Controller의 결과 토픽 두 개도 발행 구현이 되어 있다.
 
 ```
 string task_id
@@ -314,6 +326,8 @@ builtin_interfaces/Time stamp
 
 토픽은 `/kit/command_result`다. 명령 해석과 검증이 끝날 때 성공·실패 모두 발행한다.
 성공 시 `command_json`은 비어 있지 않은 JSON 객체여야 한다.
+
+현재 성공과 일반 STT 예외는 발행한다. `RateLimitError`, `invalid_command`, 기타 LLM 예외는 서비스 실패 응답만 반환하고 토픽을 발행하지 않는 분기가 남아 있으므로, **모든 실패가 DB에 기록된다고 가정하면 안 된다.** 서비스 응답의 `command_json`에는 과도기적으로 `raw_text`와 `task_id`도 들어가지만, 발행 메시지의 `command_json`은 `kit_type`과 `items`만 남긴다.
 
 ### 4.2 `msg/TaskStatus.msg` (로봇 → DB/UI)
 
@@ -389,7 +403,7 @@ ros2 topic hz   /detection/objects
 
 # 좌표 서비스 왕복 시험 (Day 2)
 ros2 service call /get_component_pose kit_interfaces/srv/GetComponentPose \
-  "{component: 'cup_ramen', robot_posx: [400,0,400,0,180,0], max_age_sec: 1.0}"
+  "{component: '컵라면', robot_posx: [400,0,400,0,180,0], max_age_sec: 1.0}"
 ros2 service call /get_command kit_interfaces/srv/GetCommand "{task_id: 'TASK-20260905T053012123456Z'}"
 
 # 상태 발행 확인
@@ -397,8 +411,8 @@ ros2 topic echo /kit/task_status
 ros2 topic echo /kit/command_result
 ros2 topic echo /kit/component_result
 
-# Day 1 확인 항목: 로봇 상태 토픽이 실제로 있는지 (2.5절)
-ros2 topic list | grep dsr
+# Motion이 사용하는 TF가 연결되는지 확인
+ros2 run tf2_ros tf2_echo base_link link_6
 ```
 
 Day 2 에 `object_detection` 이 고정 `DetectionArray` 를 발행하는 mock 부터 만드는 이유가 이것이다. YOLO 모델이 나오기 전에 계약과 `position_estimation` 결선을 먼저 끝내둔다.

@@ -1,0 +1,84 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="r100_m1509_dual">
+  <xacro:arg name="color" default="white"/>
+  <xacro:arg name="arm_prefix" default="left_"/>
+  <xacro:arg name="arm2_prefix" default="right_"/>
+  <xacro:arg name="mount_xyz" default="0 -0.25 0"/>
+  <xacro:arg name="mount_rpy" default="0 0 0"/>
+  <xacro:arg name="arm2_mount_xyz" default="0 0.25 0"/>
+  <xacro:arg name="arm2_mount_rpy" default="0 0 0"/>
+  <xacro:arg name="enable_ros2_control" default="false"/>
+  <xacro:arg name="host" default="127.0.0.1"/>
+  <xacro:arg name="port" default="12345"/>
+  <xacro:arg name="rt_host" default="192.168.137.50"/>
+  <xacro:arg name="mode" default="virtual"/>
+  <xacro:arg name="model" default="m1509"/>
+  <xacro:arg name="update_rate" default="100"/>
+  <xacro:arg name="arm2_host" default="127.0.0.1"/>
+  <xacro:arg name="arm2_port" default="12348"/>
+  <xacro:arg name="arm2_rt_host" default="192.168.137.50"/>
+  <xacro:arg name="arm2_mode" default="virtual"/>
+  <xacro:arg name="arm2_model" default="m1509"/>
+  <xacro:arg name="arm2_update_rate" default="100"/>
+
+  <!-- MoveIt-only whole-body base joints with finite bounds (prevents planar virtual-joint +/-inf UI). -->
+  <link name="odom"/>
+  <link name="base_x_link"/>
+  <link name="base_xy_link"/>
+  <link name="base_yaw_link"/>
+
+  <joint name="base_x" type="prismatic">
+    <parent link="odom"/>
+    <child link="base_x_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-5.0" upper="5.0" effort="1000.0" velocity="1.0"/>
+  </joint>
+
+  <joint name="base_y" type="prismatic">
+    <parent link="base_x_link"/>
+    <child link="base_xy_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-5.0" upper="5.0" effort="1000.0" velocity="1.0"/>
+  </joint>
+
+  <joint name="base_yaw" type="revolute">
+    <parent link="base_xy_link"/>
+    <child link="base_yaw_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-3.141592653589793" upper="3.141592653589793" effort="1000.0" velocity="1.0"/>
+  </joint>
+
+  <joint name="base_yaw_to_base_link" type="fixed">
+    <parent link="base_yaw_link"/>
+    <child link="base_link"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <!-- Reuse the canonical dual-arm description so MoveIt and control share one kinematic source. -->
+  <xacro:include filename="$(find dsr_description2)/xacro/r100_m1509_dual.urdf.xacro"/>
+  <xacro:r100_m1509_dual
+    color="$(arg color)"
+    arm_prefix="$(arg arm_prefix)"
+    arm2_prefix="$(arg arm2_prefix)"
+    mount_xyz="$(arg mount_xyz)"
+    mount_rpy="$(arg mount_rpy)"
+    arm2_mount_xyz="$(arg arm2_mount_xyz)"
+    arm2_mount_rpy="$(arg arm2_mount_rpy)"
+    enable_ros2_control="$(arg enable_ros2_control)"
+    host="$(arg host)"
+    port="$(arg port)"
+    rt_host="$(arg rt_host)"
+    mode="$(arg mode)"
+    model="$(arg model)"
+    update_rate="$(arg update_rate)"
+    arm2_host="$(arg arm2_host)"
+    arm2_port="$(arg arm2_port)"
+    arm2_rt_host="$(arg arm2_rt_host)"
+    arm2_mode="$(arg arm2_mode)"
+    arm2_model="$(arg arm2_model)"
+    arm2_update_rate="$(arg arm2_update_rate)"
+  />
+</robot>
